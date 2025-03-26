@@ -2,7 +2,9 @@
 from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene,QGraphicsPixmapItem
 from PyQt5.QtCore import pyqtSignal, Qt, QRectF
 from PyQt5.QtGui import QPixmap,QImageReader
+from sympy import im
 from canvas import Canvas
+import os   
 
 #ImageGraphicsView 的类，该类继承自 QGraphicsView，用于显示和缩放图像
 class ImageGraphicsView(QGraphicsView):
@@ -25,36 +27,48 @@ class ImageGraphicsView(QGraphicsView):
 
     def load_image(self, file_path):
         try:
-            with open(file_path, 'rb') as f:
-                data = f.read()
-        except Exception as e:
-            print(f"Unable to read the content of the file:{e} from ImageGraphicsView.load_image")  # 调试信息
-            return
-        
-        print(f"Try to open the file: {file_path} from ImageGraphicsView.load_image")  # 调试信息
-        reader = QImageReader(file_path)
-        if reader.canRead():
+            # 先检查文件是否存在
+            if not os.path.exists(file_path):
+                print(f"File does not exist: {file_path}")
+                return False, "File does not exist"
+                
+            print(f"Try to open the file: {file_path} from ImageGraphicsView.load_image")  # 调试信息
+            
+            # 尝试读取图像
+            reader = QImageReader(file_path)
+            if not reader.canRead():
+                print(f"Error loading image:{file_path} from ImageGraphicsView.load_image_else_part")  # 调试信息
+                return False, "Cannot read file. Unsupported image format or corrupted file."
+                
             image = reader.read()
+            if image.isNull():
+                print(f"Error loading image:{file_path} from ImageGraphicsView.load_image")  # 调试信息
+                return False, "Failed to load image. The file might be corrupted or in an unsupported format."
+                
             pixmap = QPixmap.fromImage(image)
             if pixmap.isNull():
-                print(f"Error loading image:{file_path} from ImageGraphicsView.load_image")  # 调试信息
-                return
-        else:
-            print(f"Error loading image:{file_path} from ImageGraphicsView.load_image_else_part")  # 调试信息
-            return
+                print(f"Error creating pixmap from image: {file_path}")  # 调试信息
+                return False, "Failed to convert image to pixmap"
 
-        self.set_pixmap(pixmap)
+            # 成功加载图像
+            self.set_pixmap(pixmap)
 
-        # 创建 Canvas 并设置大小与图像一致
-        image_size = pixmap.size()
-        if self.canvas:
-            self.scene().removeItem(self.canvas)
-        self.canvas = Canvas(image_size)
-        self.scene().addItem(self.canvas)
+            # 创建 Canvas 并设置大小与图像一致
+            image_size = pixmap.size()
+            if self.canvas:
+                self.scene().removeItem(self.canvas)
+            self.canvas = Canvas(image_size)
+            self.scene().addItem(self.canvas)
 
-        # 确保 Canvas 在顶部
-        self.canvas.setZValue(1)
-        self.pixmap_item.setZValue(0)
+            # 确保 Canvas 在顶部
+            self.canvas.setZValue(1)
+            self.pixmap_item.setZValue(0)
+            
+            return True, None  # 成功返回
+            
+        except Exception as e:
+            print(f"Exception in load_image: {str(e)}")
+            return False, f"An error occurred while loading the image: {str(e)}"
 
 
     def get_shapes(self):

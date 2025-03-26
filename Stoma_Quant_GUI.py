@@ -113,6 +113,9 @@ class MainWindow(QMainWindow):
         # self.actionAdjust.setObjectName("actionAdjust")
         # self.actionProcess = QtWidgets.QAction(MainWindow)
         # self.actionProcess.setObjectName("actionProcess")
+        # 在创建其他动作的区域添加此代码
+        self.actionShortcutHelp = QtWidgets.QAction(MainWindow)
+        self.actionShortcutHelp.setObjectName("actionShortcutHelp")
 
         self.actionABorAD = QtWidgets.QAction(MainWindow)
         self.actionABorAD.setObjectName("actionABorAD")
@@ -227,7 +230,9 @@ class MainWindow(QMainWindow):
 
         self.menuSetting.addAction(self.actionModelSetting)  # 添加动作到 menuSetting
         self.menuSetting.addAction(self.actionInferenceSetting)  # 添加动作到 menuSetting
-
+                # 在将其他动作添加到More菜单后添加这一行
+        self.menuMoreInfo.addSeparator()  # 添加分隔线
+        self.menuMoreInfo.addAction(self.actionShortcutHelp)
         # 将菜单添加到菜单栏
         self.menubar.addAction(self.menuFile.menuAction())
         self.menubar.addAction(self.menuView.menuAction())
@@ -365,7 +370,7 @@ class MainWindow(QMainWindow):
         self.retranslateUi(MainWindow)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
-
+    
     def on_actionEditShapes_toggled(self, checked):
         if checked:
             # 取消选中 'create' 工具按钮
@@ -398,6 +403,7 @@ class MainWindow(QMainWindow):
         self.menuMoreInfo.setTitle(_translate("MainWindow", "More"))
         self.toolBar.setWindowTitle(_translate("MainWindow", "工具栏"))
         self.menuSetting.setTitle(_translate("MainWindow", "Settings"))
+        self.actionShortcutHelp.setText(_translate("MainWindow", "Shortcut Keys Help"))
 
 
 

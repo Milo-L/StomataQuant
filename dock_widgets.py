@@ -62,7 +62,6 @@ class ShapeListDock(QtWidgets.QDockWidget):
             item = self.table_widget.item(row, 1)  # 假设第1列是 Label
             if item and id(item.data(QtCore.Qt.UserRole)) == id(shape):
                 return row
-        print(f"警告: 在形状列表中找不到形状: {shape}, ID: {id(shape)}")
         # 返回-1表示未找到，而不是抛出异常
         return -1
     

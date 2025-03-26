@@ -347,7 +347,7 @@ class BatchProcessor:
                 "conf": 0.5,
                 "iou": 0.7,
                 "device": "cpu",
-                "save_path": os.path.join(os.getcwd(), "OutPut"),
+                "save_path": os.path.join(os.getcwd(), "Inference_OutPut"),
                 "imgsz": 1024,
                 "max_det": 500
             }

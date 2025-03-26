@@ -144,12 +144,15 @@ class UIMainWindow(MainWindow):
         self.ai_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
         self.ai_shortcut.activated.connect(self.run_YOLO_seg_inference)
         
-        # 定义按下 Ctrl+A+Delete 的快捷键
-        self.ctrl_a_delete_shortcut = QShortcut(QKeySequence("Ctrl+A+Delete"), self)
-        self.ctrl_a_delete_shortcut.activated.connect(self.delete_all_shapes)
-        # 定义按下 Ctrl+A+Backspace 的快捷键
-        self.ctrl_a_backspace_shortcut = QShortcut(QKeySequence("Ctrl+A+Backspace"), self)
-        self.ctrl_a_backspace_shortcut.activated.connect(self.delete_all_shapes)
+        # 添加这些新快捷键
+        self.ctrl_shift_delete_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Delete"), self)
+        self.ctrl_shift_delete_shortcut.activated.connect(self.delete_all_shapes)
+        self.ctrl_shift_backspace_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Backspace"), self)
+        self.ctrl_shift_backspace_shortcut.activated.connect(self.delete_all_shapes)
+
+        # 添加批处理快捷键
+        self.batch_processing_shortcut = QShortcut(QKeySequence("Ctrl+B"), self)
+        self.batch_processing_shortcut.activated.connect(self.batch_processing)
 
         
         self.selectmodel_shortcut = QShortcut(QKeySequence("Ctrl+M"), self)
@@ -189,6 +192,111 @@ class UIMainWindow(MainWindow):
         self.actionBatchImportRectangle.triggered.connect(self.batch_import_rectangle)
         self.actionBatchImportRotatedRectangle.triggered.connect(self.batch_import_rotated_rectangle)
 
+                # 在__init__方法的末尾添加
+        self.actionShortcutHelp.triggered.connect(self.show_shortcut_help)
+
+    def show_shortcut_help(self):
+        """显示所有可用的键盘快捷键，使用非模态窗口"""
+        # 如果已经存在快捷键窗口，则显示它
+        if hasattr(self, 'shortcut_dialog') and self.shortcut_dialog.isVisible():
+            self.shortcut_dialog.raise_()
+            self.shortcut_dialog.activateWindow()
+            return
+        
+        # 创建一个非模态对话框
+        self.shortcut_dialog = QtWidgets.QDialog(self)
+        self.shortcut_dialog.setWindowTitle("Keyboard Shortcuts")
+        self.shortcut_dialog.setWindowFlags(
+            QtCore.Qt.Window | 
+            QtCore.Qt.WindowStaysOnTopHint | 
+            QtCore.Qt.WindowCloseButtonHint
+        )
+        
+        # 设置大小和位置
+        self.shortcut_dialog.resize(500, 600)
+        # 居中显示在主窗口上
+        center_point = self.geometry().center()
+        dialog_rect = self.shortcut_dialog.geometry()
+        dialog_rect.moveCenter(center_point)
+        self.shortcut_dialog.setGeometry(dialog_rect)
+        
+        # 创建布局
+        layout = QtWidgets.QVBoxLayout(self.shortcut_dialog)
+        
+        # 设置快捷键文本
+        shortcut_text = """
+    <h3>Keyboard Shortcuts</h3>
+    <table border="0" cellspacing="10">
+        <tr><th colspan="2" align="left">File Operations</th></tr>
+        <tr>
+            <td><b>Ctrl+O</b></td>
+            <td>Open File</td>
+        </tr>
+        
+        <tr><th colspan="2" align="left">Analysis & Processing</th></tr>
+        <tr>
+            <td><b>Ctrl+F</b></td>
+            <td>Feature Extraction</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl+I</b></td>
+            <td>Run AI Inference</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl+M</b></td>
+            <td>Select Model</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl+B</b></td>
+            <td>Batch Processing</td>
+        </tr>
+
+        <tr><th colspan="2" align="left">Shape Operations</th></tr>
+        <tr>
+            <td><b>Ctrl+Z</b></td>
+            <td>Undo Operation</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl+C</b></td>
+            <td>Copy/Clone Selected Shape</td>
+        </tr>
+        <tr>
+            <td><b>Delete</b> / <b>Backspace</b></td>
+            <td>Delete Selected Shape</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl+Shift+Delete</b> / <b>Ctrl+Shift+Backspace</b></td>
+            <td>Delete All Shapes</td>
+        </tr>
+        
+        <tr><th colspan="2" align="left">View Controls</th></tr>
+        <tr>
+            <td><b>Ctrl+Space</b></td>
+            <td>Fit to View</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl+Mouse Wheel</b></td>
+            <td>Zoom In/Out</td>
+        </tr>
+        <tr>
+            <td><b>Ctrl++</b> / <b>Ctrl+-</b></td>
+            <td>Zoom In/Out</td>
+        </tr>
+    </table>
+    """
+        # 使用QTextBrowser以支持富文本和滚动条
+        text_browser = QtWidgets.QTextBrowser()
+        text_browser.setHtml(shortcut_text)
+        text_browser.setOpenExternalLinks(True)
+        layout.addWidget(text_browser)
+        
+        # 添加关闭按钮（可选）
+        close_button = QtWidgets.QPushButton("Close")
+        close_button.clicked.connect(self.shortcut_dialog.close)
+        layout.addWidget(close_button)
+        
+        # 显示对话框(非模态)
+        self.shortcut_dialog.show()
     #批量导入
     # 修改批量导入方法如下:
     def batch_import_polygon(self):
@@ -1225,9 +1333,10 @@ class UIMainWindow(MainWindow):
     # At the same time, bind the shapeSelected signal of the canvas to the on_shape_selected_in_canvas slot function to ensure that the Dock table can be updated automatically when a shape is selected on the canvas.
     #↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     #################################################################
+
     def open_file(self):
         options = QFileDialog.Options()
-        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select an image file", "",
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select image files", "",
                                                     "Image Files (*.png *.jpg *.jpeg *.bmp *.tif);;All Files (*)",
                                                     options=options)
         print("=====================================")  # 调试信息
@@ -1235,44 +1344,79 @@ class UIMainWindow(MainWindow):
         print("=====================================")  # 调试信息
         for file_path in file_paths:
             if file_path and file_path not in self.opened_files:
-                tab = QWidget()
-                tab_layout = QVBoxLayout(tab)
-                graphics_view = ImageGraphicsView(tab)
-                graphics_view.load_image(file_path)
                 print(f"LOAD IMAGE: {file_path} from open_file method")  # 调试信息
-
-                if graphics_view.canvas:
-                    graphics_view.canvas.shapeSelected.connect(self.on_shape_selected_in_canvas)
-                    graphics_view.canvas.shapeCreated.connect(self.on_shape_created)
-                    graphics_view.canvas.shapesChanged.connect(self.on_shapes_changed_in_canvas)
-               
-                else:
-                    print("Canvas Not Set。")
                 
-                tab_layout.addWidget(graphics_view)
-                tab.setLayout(tab_layout)
-            
-                new_tab_index = self.tabWidget.addTab(tab, os.path.basename(file_path))
-                self.tabWidget.setCurrentIndex(new_tab_index)
-                self.opened_files.append(file_path)
-                tab.shapes = []
-                tab.setProperty("graphics_view", graphics_view)
-                tab.setProperty("file_path", file_path)
-                print(f"设置属性: file_path={file_path}, graphics_view={graphics_view}")  # 调试信息
-
+                # 创建一个新标签页
+                tab = QWidget()
+                layout = QVBoxLayout(tab)
+                
+                # 创建ImageGraphicsView实例
+                graphics_view = ImageGraphicsView(tab)
+                layout.addWidget(graphics_view)
+                
+                # 尝试加载图像，并检查返回状态
+                success, error_msg = graphics_view.load_image(file_path)
+                
+                if not success:
+                    # 显示错误消息并跳过这个文件
+                    QMessageBox.warning(
+                        self,
+                        "Unable to load image",
+                        f"Failed to load image file: {file_path}\n\n{error_msg}"
+                    )
+                    # 销毁已创建的tab和graphics_view
+                    tab.deleteLater()
+                    continue
+                
+                # 只有图像成功加载时才继续
+                
+                # 连接信号和槽
                 graphics_view.zoomChanged.connect(self.handle_zoom_changed)
                 graphics_view.mousePositionChanged.connect(self.update_mouse_position)
                 graphics_view.pixelValueChanged.connect(self.update_pixel_value)
-                self.fit_to_view()
-
-
-                 # 设置当前标签
-                self.tabWidget.setCurrentIndex(new_tab_index)
                 
-                # 手动调用更新方法以立即更新标签信息
-                self.update_zoom_on_tab_change(new_tab_index)
+                # 设置Canvas信号连接
+                graphics_view.canvas.shapeSelected.connect(self.on_shape_selected_in_canvas)
+                graphics_view.canvas.shapeCreated.connect(self.on_shape_created)
+                graphics_view.canvas.shapesChanged.connect(self.on_shapes_changed_in_canvas)
+                
+                # 添加标签页
+                tab_name = os.path.basename(file_path)
+                tab_index = self.tabWidget.addTab(tab, tab_name)
+                
+                # 设置文件路径和图形视图作为标签页的属性
+                tab.setProperty("file_path", file_path)
+                tab.setProperty("graphics_view", graphics_view)
+                
+                # 选择新添加的标签页
+                self.tabWidget.setCurrentIndex(tab_index)
+                
+                # 将文件添加到已打开文件列表中
+                self.opened_files.append(file_path)
+                
+                # 启用相关操作
+                self.actionEditShapes.setEnabled(True)
+                self.actionFilterAllEdges.setEnabled(True)
+                self.actionFilterTopLeft.setEnabled(True)
+                self.actionFilterRightBottom.setEnabled(True)
+                
+                # 添加文件大小标签
+                file_size = os.path.getsize(file_path)
+                self.fileSizeLabel.setText(f"File Size: {file_size / 1024:.1f} KB; ")
+                self.fit_to_view()
+                
+                # 添加图像大小标签
+                pixmap = graphics_view.pixmap_item.pixmap()
+                self.imageSizeLabel.setText(f"Image Size: {pixmap.width()}×{pixmap.height()}; ")
             else:
-                print(f"he file is open or the path is invalid: {file_path}")
+                if file_path in self.opened_files:
+                    # 文件已经打开，切换到该标签页
+                    for i in range(self.tabWidget.count()):
+                        tab = self.tabWidget.widget(i)
+                        if tab.property("file_path") == file_path:
+                            self.tabWidget.setCurrentIndex(i)
+                            
+                            break
 
     def close_tab(self, index):
         tab = self.tabWidget.widget(index)
@@ -1439,16 +1583,6 @@ class UIMainWindow(MainWindow):
     #################################################################
 
     ### 模型选择函数，对应模型选择按钮 Model selection function, corresponding to the model selection button
-    # def load_model(self):
-    #     options = QFileDialog.Options()
-    #     model_path, _ = QFileDialog.getOpenFileName(self, "Select the YOLO model file", "", "Model Files (*.pt *.onnx);;All Files (*)", options=options)
-    #     if model_path:
-    #         try:
-    #             self.model = YOLO(model_path)  # Load the YOLO model
-    #             QMessageBox.information(self, "Model loading success", f"The model has been successfully loaded：{model_path.split('/')[-1]}")
-    #             print(f"The model has been successfully loaded：{model_path,self.model.model_name}")  # 调试输出
-    #         except Exception as e:
-    #             QMessageBox.critical(self, "Model loading failure", f"Unable to load model：{str(e)}")
     def load_model(self):
         options = QFileDialog.Options()
         model_path, _ = QFileDialog.getOpenFileName(self, "Select the YOLO model file", "",
