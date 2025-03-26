@@ -5,6 +5,8 @@ from PyQt5.QtCore import QPointF, QLineF
 from PyQt5.QtGui import QColor
 from matplotlib import scale
 from shape import Shape
+from shapely.geometry import Polygon, MultiPolygon
+from shapely.ops import unary_union
 import numpy as np
 import numba
 
@@ -24,6 +26,541 @@ def check_numba():
     except Exception as e:
         print(f"Numba Self-check failed: {e}")
         return False
+
+
+######################################################################
+# 全局函数，关于推理后多边形的后处理
+# Global function, post-processing for the resulting polygons after reasoning
+######################################################################
+
+def process_polygon_data(class_polygons_dict, image_width=None, image_height=None):
+    """
+    完整处理多边形数据，包括移除内部点、处理离群点，并确保多边形有效性
+    返回:
+    处理后的多边形字典
+    """
+    # 首先处理内部点重叠
+    processed_dict = optimized_process_raw_polygons(class_polygons_dict)
+    # 然后处理离群点，传入图像尺寸
+    cleaned_dict = remove_outlier_points(processed_dict, image_width=image_width, image_height=image_height)
+    # 最后确保所有多边形都是有效的
+    final_dict = validate_and_fix_polygons(cleaned_dict)
+    print('processing polygon data is finished')
+    return final_dict
+
+def optimized_process_raw_polygons(class_polygons_dict):
+    """
+    优化处理多边形数据，删除位于其他多边形内部的点
+
+    处理逻辑:
+    1. 对每一类别单独处理
+    2. 计算所有多边形的包围盒并按面积从大到小排序
+    3. 记录每个多边形可能相交的其他多边形(通过包围盒相交判断)
+    4. 按面积从大到小处理多边形，删除位于其他多边形内部的点
+
+    参数:
+    class_polygons_dict: 字典，键为classnum，值为该类的多边形点列表
+
+    返回:
+    处理后的多边形字典
+    """
+    global USE_NUMBA
+    result_polygons_dict = {}
+
+    # 对每个类别分别处理
+    for classnum, polygons in class_polygons_dict.items():
+        result_polygons_dict[classnum] = []
+
+        # 如果该类别只有一个多边形，不需要处理
+        if len(polygons) <= 1:
+            result_polygons_dict[classnum] = polygons
+            continue
+
+        # 1. 计算所有多边形的包围盒及其面积
+        bounding_boxes = []
+        for i, (points_x, points_y) in enumerate(polygons):
+            if len(points_x) <= 3:  # 点数太少，直接标记
+                bounding_boxes.append((i, None, 0))  # (索引，包围盒，面积)
+                continue
+
+            min_x, max_x = min(points_x), max(points_x)
+            min_y, max_y = min(points_y), max(points_y)
+            bbox = (min_x, min_y, max_x, max_y)
+            area = (max_x - min_x) * (max_y - min_y)  # 计算包围盒面积
+            bounding_boxes.append((i, bbox, area))
+
+        # 2. 按照包围盒面积从大到小排序
+        bounding_boxes.sort(key=lambda x: x[2], reverse=True)
+
+        # 3. 预先计算可能相交的多边形(包围盒相交测试)
+        potential_intersections = {}
+        for i, (idx_i, bbox_i, _) in enumerate(bounding_boxes):
+            if bbox_i is None:
+                continue
+
+            potential_intersections[idx_i] = []
+            min_x_i, min_y_i, max_x_i, max_y_i = bbox_i
+
+            for j, (idx_j, bbox_j, _) in enumerate(bounding_boxes):
+                if idx_i == idx_j or bbox_j is None:
+                    continue
+
+                min_x_j, min_y_j, max_x_j, max_y_j = bbox_j
+
+                # 检查包围盒是否相交
+                if (min_x_i <= max_x_j and max_x_i >= min_x_j and
+                        min_y_i <= max_y_j and max_y_i >= min_y_j):
+                    potential_intersections[idx_i].append(idx_j)
+
+        # 4. 按照包围盒面积从大到小处理多边形
+        for idx_i, bbox_i, _ in bounding_boxes:
+            if bbox_i is None:
+                # 直接添加点数太少的多边形
+                result_polygons_dict[classnum].append(polygons[idx_i])
+                continue
+
+            points_x, points_y = polygons[idx_i]
+
+            # 如果点数太少，直接添加不处理
+            if len(points_x) <= 3:
+                result_polygons_dict[classnum].append((points_x, points_y))
+                continue
+
+            # 转换为numpy数组提高性能
+            np_points_x = np.array(points_x)
+            np_points_y = np.array(points_y)
+
+            # 标记需要保留的点
+            keep_mask = np.ones(len(np_points_x), dtype=bool)
+
+            # 5. 检查点是否在其他可能相交的多边形内部
+            for idx_j in potential_intersections.get(idx_i, []):
+                other_points_x, other_points_y = polygons[idx_j]
+
+                # 如果点数太少，跳过
+                if len(other_points_x) <= 3:
+                    continue
+
+                np_other_x = np.array(other_points_x)
+                np_other_y = np.array(other_points_y)
+
+                # 使用Numba加速或纯Python处理
+                if USE_NUMBA:
+                    try:
+                        # 检查点是否在其他多边形内部或边界上
+                        sub_mask = _improved_remove_points_inside_other_polygon(
+                            np_points_x, np_points_y, np_other_x, np_other_y)
+                        # 更新总mask
+                        keep_mask = keep_mask & sub_mask
+                    except Exception as e:
+                        print(f"Numba加速失败: {e}")
+                        USE_NUMBA = False
+
+                # 降级到纯Python处理
+                if not USE_NUMBA:
+                    for k in range(len(points_x)):
+                        if keep_mask[k]:  # 只检查还没被标记删除的点
+                            on_edge = False
+                            in_poly = _point_in_polygon_numba(points_x[k], points_y[k],
+                                                              other_points_x, other_points_y)
+
+                            # 额外检查点是否在多边形边上
+                            if not in_poly:
+                                for edge_i in range(len(other_points_x)):
+                                    edge_j = (edge_i + 1) % len(other_points_x)
+                                    x1, y1 = other_points_x[edge_i], other_points_y[edge_i]
+                                    x2, y2 = other_points_x[edge_j], other_points_y[edge_j]
+
+                                    # 简化的边界检测
+                                    if (min(x1, x2) <= points_x[k] <= max(x1, x2) and
+                                            min(y1, y2) <= points_y[k] <= max(y1, y2)):
+
+                                        # 计算点到线段的距离
+                                        dist_to_line = abs(
+                                            (y2 - y1) * points_x[k] - (x2 - x1) * points_y[k] + x2 * y1 - y2 * x1) / \
+                                                       np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) if ((y2 - y1) ** 2 + (
+                                                    x2 - x1) ** 2) > 1e-10 else float('inf')
+
+                                        if dist_to_line < 1e-6:
+                                            on_edge = True
+                                            break
+
+                            # 如果点在多边形内部或边上，标记为删除
+                            if in_poly or on_edge:
+                                keep_mask[k] = False
+
+            # 6. 根据保留掩码更新点列表
+            if not all(keep_mask) and sum(keep_mask) >= 3:  # 确保删除后至少有3个点
+                new_points_x = [points_x[k] for k in range(len(points_x)) if keep_mask[k]]
+                new_points_y = [points_y[k] for k in range(len(points_y)) if keep_mask[k]]
+
+                # 额外验证：确保新多边形有效且没有重复点
+                unique_points = set(zip(new_points_x, new_points_y))
+                if len(unique_points) >= 3:
+                    result_polygons_dict[classnum].append((new_points_x, new_points_y))
+                else:
+                    # 如果删除后点数不足或重合点，保留原始多边形
+                    result_polygons_dict[classnum].append((points_x, points_y))
+            else:
+                # 如果没有点需要删除或删除后点数不足，保留原始点
+                result_polygons_dict[classnum].append((points_x, points_y))
+
+    return result_polygons_dict
+
+def remove_outlier_points(class_polygons_dict, angle_threshold=15, dist_factor=2.0, image_width=None,
+                          image_height=None):
+    """
+    从多边形中移除离群点
+
+    参数:
+    class_polygons_dict: 字典，键为classnum，值为该类的多边形点列表
+    angle_threshold: 角度阈值(度)，小于此角度的顶点可能是离群点
+    dist_factor: 距离因子，用于判断点是否离群
+    image_width: 图像宽度，可选
+    image_height: 图像高度，可选
+
+    返回:
+    处理后的多边形字典
+    """
+    result_dict = {}
+
+    for classnum, polygons in class_polygons_dict.items():
+        result_dict[classnum] = []
+
+        for points_x, points_y in polygons:
+            # 如果点数太少，无需处理
+            if len(points_x) <= 20:
+                result_dict[classnum].append((points_x, points_y))
+                continue
+
+            # 转换为QPointF列表以便计算
+            points = [QPointF(x, y) for x, y in zip(points_x, points_y)]
+
+            # 如果自动检测判断不需要处理离群点，则跳过
+            # 这里传入图像尺寸参数
+            if not need_outlier_removal(points, image_width, image_height):
+                result_dict[classnum].append((points_x, points_y))
+                continue
+
+            # 处理离群点
+            filtered_points = filter_outlier_points(points, angle_threshold, dist_factor)
+
+            # 提取处理后的x和y坐标
+            filtered_x = [p.x() for p in filtered_points]
+            filtered_y = [p.y() for p in filtered_points]
+
+            # 添加到结果
+            result_dict[classnum].append((filtered_x, filtered_y))
+
+    return result_dict
+
+def need_outlier_removal(points, image_width=None, image_height=None, boundary_tolerance=5):
+    """自动判断多边形是否需要离群点移除"""
+    global USE_NUMBA
+
+    # 计算多边形特征
+    n = len(points)
+    if n <= 20:
+        return False
+
+    # 检查是否是边界多边形
+    if image_width is not None and image_height is not None:
+        # 检查是否有任何点在图像边界附近
+        for point in points:
+            x, y = point.x(), point.y()
+            if (x <= boundary_tolerance or x >= image_width - boundary_tolerance or
+                    y <= boundary_tolerance or y >= image_height - boundary_tolerance):
+                # 多边形有点在边界上，不需要离群点移除
+                return False
+
+    # 提取顶点坐标为NumPy数组
+    vertices_x = np.array([p.x() for p in points])
+    vertices_y = np.array([p.y() for p in points])
+
+    if USE_NUMBA:
+        try:
+            # 使用Numba加速计算边长统计信息
+            mean_length, std_length, _ = _calculate_edges_stats_numba(vertices_x, vertices_y)
+
+            # 如果边长变化太大，可能有离群点
+            if std_length / mean_length > 0.8:
+                return True
+
+            # 计算锐角数量
+            sharp_angles_count = _count_sharp_angles_numba(vertices_x, vertices_y, np.radians(30))
+
+            # 如果锐角比例超过阈值，可能有离群点
+            if sharp_angles_count / n > 0.1:
+                return True
+
+            return False
+        except Exception as e:
+            print(f"Numba acceleration failed in need_outlier_removal: {e}")
+            USE_NUMBA = False
+
+    # 降级到原始实现
+    # 1. 计算边长标准差
+    edges_length = []
+    for i in range(n):
+        p1 = points[i]
+        p2 = points[(i + 1) % n]
+        length = _calculate_distance_numba(p1.x(), p1.y(), p2.x(), p2.y())
+        edges_length.append(length)
+
+    mean_length = sum(edges_length) / len(edges_length)
+    std_length = np.sqrt(sum((x - mean_length) ** 2 for x in edges_length) / len(edges_length))
+
+    # 如果边长变化太大，可能有离群点
+    if std_length / mean_length > 0.8:
+        return True
+
+    # 2. 检查锐角
+    sharp_angles_count = 0
+    for i in range(n):
+        p1 = points[(i - 1) % n]
+        p2 = points[i]
+        p3 = points[(i + 1) % n]
+
+        # 计算角度(弧度)
+        angle = calculate_angle(p1, p2, p3)
+
+        # 检查是否是锐角(小于30度)
+        if angle < np.radians(30):
+            sharp_angles_count += 1
+
+    # 如果锐角比例超过阈值，可能有离群点
+    if sharp_angles_count / n > 0.1:
+        return True
+
+    return False
+
+def filter_outlier_points(points, angle_threshold=15, dist_factor=2.0):
+    """使用角度和距离方法过滤离群点，采用更稳健的策略"""
+    global USE_NUMBA
+
+    n = len(points)
+    if n <= 20:
+        return points
+
+    # 提取顶点坐标为NumPy数组
+    vertices_x = np.array([p.x() for p in points])
+    vertices_y = np.array([p.y() for p in points])
+
+    if USE_NUMBA:
+        try:
+            # 计算边长
+            _, _, edge_lengths = _calculate_edges_stats_numba(vertices_x, vertices_y)
+            median_length = np.median(edge_lengths)
+
+            # 使用Numba加速计算离群评分
+            outlier_scores = _calculate_outlier_scores_numba(
+                vertices_x, vertices_y, angle_threshold, dist_factor, median_length)
+
+            # 处理评分结果
+            threshold_score = 70  # 最低评分阈值
+            is_outlier = np.zeros(n, dtype=bool)
+
+            # 找出高于阈值的点
+            candidates = []
+            for i in range(n):
+                if outlier_scores[i] > threshold_score:
+                    candidates.append((i, outlier_scores[i]))
+
+            # 按评分从高到低排序
+            candidates.sort(key=lambda x: x[1], reverse=True)
+
+            # 确定要删除的点数量
+            if n > 50:
+                max_outliers = max(0, n // 50)
+            else:
+                max_outliers = max(0, n // 100)
+
+            # 如果待删除点过多，只取评分最高的几个
+            if len(candidates) > max_outliers:
+                candidates = candidates[:max_outliers]
+
+            # 设置标记
+            for i, _ in candidates:
+                is_outlier[i] = True
+
+            # 构建结果
+            filtered_points = [points[i] for i in range(n) if not is_outlier[i]]
+
+            # 确保至少有3个点，否则返回原始点集
+            if len(filtered_points) < 3:
+                return points
+
+            return filtered_points
+        except Exception as e:
+            print(f"Numba acceleration failed in filter_outlier_points: {e}")
+            USE_NUMBA = False
+
+    # 降级到原始实现
+    # 保持原有实现不变
+    # 初始化标记和评分
+    is_outlier = [False] * n
+    outlier_score = [0] * n  # 离群点评分，越高越可能是离群点
+
+    # 计算相邻边长的中位数
+    edge_lengths = []
+    for i in range(n):
+        p1 = points[i]
+        p2 = points[(i + 1) % n]
+        length = _calculate_distance_numba(p1.x(), p1.y(), p2.x(), p2.y())
+        edge_lengths.append(length)
+
+    median_length = np.median(edge_lengths)
+
+    # 同时使用角度和距离评估每个点
+    for i in range(n):
+        p1 = points[(i - 1) % n]
+        p2 = points[i]
+        p3 = points[(i + 1) % n]
+
+        # 计算角度(弧度)
+        angle = calculate_angle(p1, p2, p3)
+        angle_degree = np.degrees(angle)
+
+        # 计算与相邻点的距离
+        dist1 = _calculate_distance_numba(p1.x(), p1.y(), p2.x(), p2.y())
+        dist2 = _calculate_distance_numba(p2.x(), p2.y(), p3.x(), p3.y())
+
+        # 角度评分 (0-100)
+        if angle_degree < angle_threshold:
+            angle_score = 100 * (1 - angle_degree / angle_threshold)
+        else:
+            angle_score = 0
+
+        # 距离评分 (0-100)
+        dist_ratio1 = dist1 / median_length if median_length > 0 else 0
+        dist_ratio2 = dist2 / median_length if median_length > 0 else 0
+
+        if dist_ratio1 > dist_factor and dist_ratio2 > dist_factor:
+            dist_score = 100 * min(1, (min(dist_ratio1, dist_ratio2) - dist_factor) / dist_factor)
+        else:
+            dist_score = 0
+
+        # 综合评分 - 只有当两种方法都认为是离群点时才给高分
+        if angle_score > 0 and dist_score > 0:
+            outlier_score[i] = (angle_score + dist_score) / 2
+        elif angle_score > 75:  # 角度非常小的情况下单独判断
+            outlier_score[i] = angle_score * 0.8
+        elif dist_score > 75:  # 距离非常大的情况下单独判断
+            outlier_score[i] = dist_score * 0.8
+        else:
+            outlier_score[i] = 0
+
+    # 处理评分结果 (保持原有逻辑不变)
+    # ...其余代码保持不变...
+
+    return filtered_points
+
+def validate_and_fix_polygons(class_polygons_dict):
+    """
+    验证并修复多边形，确保它们符合Shapely的有效性标准
+
+    参数:
+    class_polygons_dict: 字典，键为classnum，值为该类的多边形点列表
+
+    返回:
+    修复后的多边形字典
+    """
+    try:
+
+        result_dict = {}
+
+        for classnum, polygons in class_polygons_dict.items():
+            result_dict[classnum] = []
+
+            for points_x, points_y in polygons:
+
+                if len(points_x) < 20:
+                    result_dict[classnum].append((points_x, points_y))  # 保留原始点，后续处理可能会丢弃
+                    continue
+
+                # 创建点坐标对
+                coords = [(x, y) for x, y in zip(points_x, points_y)]
+                # 继续处理点数≥20的多边形...
+                # 移除重复点
+                unique_coords = []
+                for i, coord in enumerate(coords):
+                    if i == 0 or coord != coords[i - 1]:
+                        unique_coords.append(coord)
+
+                # 确保多边形闭合（第一个点等于最后一个点）
+                if len(unique_coords) >= 3 and unique_coords[0] != unique_coords[-1]:
+                    unique_coords.append(unique_coords[0])
+
+                # 创建Shapely多边形并尝试修复
+                try:
+                    poly = Polygon(unique_coords)
+
+                    # 检查多边形是否有效
+                    if not poly.is_valid:
+                        # 尝试使用buffer(0)技巧修复自相交
+                        fixed_poly = poly.buffer(0)
+
+                        # 如果结果是MultiPolygon，取最大的部分
+                        if isinstance(fixed_poly, MultiPolygon):
+                            if not fixed_poly.is_empty:
+                                fixed_poly = max(fixed_poly.geoms, key=lambda x: x.area)
+                            else:
+                                continue  # 跳过空的MultiPolygon
+                    else:
+                        fixed_poly = poly
+
+                    # 如果仍然无效或者是空的，尝试凸包
+                    if not fixed_poly.is_valid or fixed_poly.is_empty:
+                        try:
+                            from scipy.spatial import ConvexHull
+                            points = np.array(unique_coords)
+                            if len(points) < 3:
+                                continue  # 跳过点数不足的情况
+                            hull = ConvexHull(points)
+                            hull_points = points[hull.vertices]
+                            fixed_poly = Polygon(hull_points)
+                        except ImportError:
+                            print("警告: scipy库不可用，无法使用凸包修复")
+                            # 尝试简单移除可能导致问题的点
+                            if len(unique_coords) > 4:  # 确保有足够的点可以删除
+                                reduced_coords = unique_coords[::2]  # 隔一个取一个点
+                                if len(reduced_coords) >= 3:
+                                    fixed_poly = Polygon(reduced_coords)
+
+                    # 如果还是无效，使用简化算法
+                    if not fixed_poly.is_valid and hasattr(fixed_poly, 'simplify'):
+                        fixed_poly = fixed_poly.simplify(0.5)
+
+                    # 如果最终多边形有效，提取其坐标
+                    if fixed_poly.is_valid and not fixed_poly.is_empty:
+                        x, y = fixed_poly.exterior.xy
+                        fixed_x = list(x)
+                        fixed_y = list(y)
+
+                        # 确保结果至少有3个唯一点
+                        if len(set(zip(fixed_x, fixed_y))) >= 3:
+                            result_dict[classnum].append((fixed_x, fixed_y))
+                        else:
+                            # 如果修复后点数不足，尝试保留原始点
+                            if len(set(zip(points_x, points_y))) >= 3:
+                                result_dict[classnum].append((points_x, points_y))
+                    else:
+                        # 如果所有修复尝试都失败，保留原始点（如果它们足够多）
+                        if len(set(zip(points_x, points_y))) >= 3:
+                            result_dict[classnum].append((points_x, points_y))
+
+                except Exception as e:
+                    print(f"处理多边形时出错: {e}")
+                    # 发生错误时保留原始点（如果它们足够多）
+                    if len(set(zip(points_x, points_y))) >= 3:
+                        result_dict[classnum].append((points_x, points_y))
+
+        return result_dict
+
+    except ImportError:
+        print("警告: Shapely库不可用，跳过多边形验证")
+        return class_polygons_dict  # 如果Shapely不可用，返回原始数据
+
 ######################################################################
 # 全局函数，使用Numba加速计算
 # Global function, using Numba to accelerate computation
@@ -69,6 +606,37 @@ def _point_in_polygon_numba(point_x, point_y, vertices_x, vertices_y):
         j = i
     return inside
 
+def calculate_angle(p1, p2, p3):
+    """计算三点形成的角度(弧度)"""
+    global USE_NUMBA
+
+    v1x = p1.x() - p2.x()
+    v1y = p1.y() - p2.y()
+    v2x = p3.x() - p2.x()
+    v2y = p3.y() - p2.y()
+
+    if USE_NUMBA:
+        try:
+            return _calculate_angle_numba_accelerated(v1x, v1y, v2x, v2y)
+        except Exception as e:
+            print(f"Numba acceleration failed in calculate_angle: {e}")
+            USE_NUMBA = False
+
+    # 向量夹角计算
+    dot_product = v1x * v2x + v1y * v2y
+    len1 = np.sqrt(v1x ** 2 + v1y ** 2)
+    len2 = np.sqrt(v2x ** 2 + v2y ** 2)
+
+    # 防止除零错误
+    if len1 < 1e-6 or len2 < 1e-6:
+        return 0
+
+    cos_angle = dot_product / (len1 * len2)
+    # 限制在[-1, 1]范围内
+    cos_angle = max(-1, min(1, cos_angle))
+
+    return np.arccos(cos_angle)
+
 # 定义 Numba 加速版本的函数
 if USE_NUMBA:
     try:
@@ -92,9 +660,178 @@ if USE_NUMBA:
                             inside = not inside
                 j = i
             return inside
+
+        # 新增加速函数
+        @numba.jit(nopython=True, cache=True)
+        def _calculate_angle_numba_accelerated(v1x, v1y, v2x, v2y):
+            """计算两个向量之间的角度(弧度)"""
+            dot_product = v1x * v2x + v1y * v2y
+            len1 = np.sqrt(v1x ** 2 + v1y ** 2)
+            len2 = np.sqrt(v2x ** 2 + v2y ** 2)
+
+            if len1 < 1e-6 or len2 < 1e-6:
+                return 0
+
+            cos_angle = dot_product / (len1 * len2)
+            cos_angle = max(-1, min(1, cos_angle))
+
+            return np.arccos(cos_angle)
+
+        @numba.jit(nopython=True, cache=True)
+        def _calculate_edges_stats_numba(vertices_x, vertices_y):
+            """计算多边形边长的统计信息"""
+            n = len(vertices_x)
+            edges_length = np.zeros(n)
+
+            for i in range(n):
+                j = (i + 1) % n
+                dx = vertices_x[j] - vertices_x[i]
+                dy = vertices_y[j] - vertices_y[i]
+                edges_length[i] = np.sqrt(dx * dx + dy * dy)
+
+            mean_length = np.mean(edges_length)
+            std_length = np.std(edges_length)
+
+            return mean_length, std_length, edges_length
+
+        @numba.jit(nopython=True, cache=True)
+        def _count_sharp_angles_numba(vertices_x, vertices_y, threshold_radians):
+            """统计多边形中小于给定阈值的锐角数量"""
+            n = len(vertices_x)
+            sharp_angles_count = 0
+
+            for i in range(n):
+                prev_idx = (i - 1) % n
+                next_idx = (i + 1) % n
+
+                v1x = vertices_x[prev_idx] - vertices_x[i]
+                v1y = vertices_y[prev_idx] - vertices_y[i]
+                v2x = vertices_x[next_idx] - vertices_x[i]
+                v2y = vertices_y[next_idx] - vertices_y[i]
+
+                angle = _calculate_angle_numba_accelerated(v1x, v1y, v2x, v2y)
+
+                if angle < threshold_radians:
+                    sharp_angles_count += 1
+
+            return sharp_angles_count
+
+        @numba.jit(nopython=True, cache=True)
+        def _calculate_outlier_scores_numba(vertices_x, vertices_y, angle_threshold, dist_factor, median_length):
+            """计算每个点的离群评分"""
+            n = len(vertices_x)
+            outlier_scores = np.zeros(n)
+
+            for i in range(n):
+                prev_idx = (i - 1) % n
+                next_idx = (i + 1) % n
+
+                # 计算向量
+                v1x = vertices_x[prev_idx] - vertices_x[i]
+                v1y = vertices_y[prev_idx] - vertices_y[i]
+                v2x = vertices_x[next_idx] - vertices_x[i]
+                v2y = vertices_y[next_idx] - vertices_y[i]
+
+                # 计算角度
+                angle = _calculate_angle_numba_accelerated(v1x, v1y, v2x, v2y)
+                angle_degree = angle * 180.0 / np.pi
+
+                # 计算与相邻点的距离
+                dist1 = np.sqrt(
+                    (vertices_x[i] - vertices_x[prev_idx]) ** 2 + (vertices_y[i] - vertices_y[prev_idx]) ** 2)
+                dist2 = np.sqrt(
+                    (vertices_x[i] - vertices_x[next_idx]) ** 2 + (vertices_y[i] - vertices_y[next_idx]) ** 2)
+
+                # 角度评分 (0-100)
+                angle_score = 0.0
+                if angle_degree < angle_threshold:
+                    angle_score = 100.0 * (1.0 - angle_degree / angle_threshold)
+
+                # 距离评分 (0-100)
+                dist_score = 0.0
+                dist_ratio1 = dist1 / median_length if median_length > 0 else 0
+                dist_ratio2 = dist2 / median_length if median_length > 0 else 0
+
+                if dist_ratio1 > dist_factor and dist_ratio2 > dist_factor:
+                    dist_score = 100.0 * min(1.0, (min(dist_ratio1, dist_ratio2) - dist_factor) / dist_factor)
+
+                # 综合评分
+                if angle_score > 0 and dist_score > 0:
+                    outlier_scores[i] = (angle_score + dist_score) / 2.0
+                elif angle_score > 75:
+                    outlier_scores[i] = angle_score * 0.8
+                elif dist_score > 75:
+                    outlier_scores[i] = dist_score * 0.8
+
+            return outlier_scores
+        
+        @numba.jit(nopython=True, cache=True)
+        def _robust_point_in_polygon(point_x, point_y, vertices_x, vertices_y, tolerance=1e-9):
+            """更稳健的点在多边形内测试，处理边界情况"""
+            n = len(vertices_x)
+            inside = False
+            on_edge = False
+            j = n - 1
+            
+            for i in range(n):
+                # 检查点是否在多边形顶点上
+                if abs(vertices_x[i] - point_x) < tolerance and abs(vertices_y[i] - point_y) < tolerance:
+                    return True, False  # 在顶点上
+                    
+                # 检查点是否在多边形边上
+                if (((vertices_y[i] <= point_y and point_y < vertices_y[j]) or
+                    (vertices_y[j] <= point_y and point_y < vertices_y[i])) and
+                    (point_x < (vertices_x[j] - vertices_x[i]) * (point_y - vertices_y[i]) / 
+                    (vertices_y[j] - vertices_y[i]) + vertices_x[i])):
+                    inside = not inside
+                    
+                # 检查点是否在边上
+                if (min(vertices_x[i], vertices_x[j]) <= point_x <= max(vertices_x[i], vertices_x[j]) and
+                    min(vertices_y[i], vertices_y[j]) <= point_y <= max(vertices_y[i], vertices_y[j])):
+                    # 计算点到线段的距离
+                    if abs(vertices_y[j] - vertices_y[i]) < tolerance:  # 水平线
+                        if abs(point_y - vertices_y[i]) < tolerance:
+                            on_edge = True
+                    elif abs(vertices_x[j] - vertices_x[i]) < tolerance:  # 垂直线
+                        if abs(point_x - vertices_x[i]) < tolerance:
+                            on_edge = True
+                    else:  # 一般线段
+                        # 计算点到线的距离
+                        dist = abs((vertices_y[j] - vertices_y[i]) * point_x - 
+                                    (vertices_x[j] - vertices_x[i]) * point_y + 
+                                    vertices_x[j] * vertices_y[i] - vertices_y[j] * vertices_x[i]) / \
+                            np.sqrt((vertices_y[j] - vertices_y[i])**2 + (vertices_x[j] - vertices_x[i])**2)
+                        if dist < tolerance:
+                            on_edge = True
+                
+                j = i
+                
+            return inside, on_edge
+
+        @numba.jit(nopython=True, cache=True)
+        def _improved_remove_points_inside_other_polygon(polygon_points_x, polygon_points_y, 
+                                                    other_polygon_points_x, other_polygon_points_y):
+            """
+            改进的重叠点检测，考虑边界情况
+            """
+            n_points = len(polygon_points_x)
+            keep_mask = np.ones(n_points, dtype=np.bool_)
+            
+            for i in range(n_points):
+                # 检查当前点是否在另一个多边形内部或边界上
+                inside, on_edge = _robust_point_in_polygon(
+                    polygon_points_x[i], polygon_points_y[i], 
+                    other_polygon_points_x, other_polygon_points_y)
+                
+                if inside or on_edge:
+                    keep_mask[i] = False
+            
+            return keep_mask
     except Exception as e:
         print(f"Failed to define Numba functions: {e}")
         USE_NUMBA = False
+
+
 
 ######################################################################
 # Canvas

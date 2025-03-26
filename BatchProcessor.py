@@ -8,9 +8,11 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QVBoxLa
 from PyQt5.QtCore import QPointF
 import glob
 from AllDialogs import BatchProcessingDialog, BatchProgressDialog
-from InferenceThread import YOLOSegInferenceThread, HeatMapGenerationThread
+from InferenceThread import YOLOSegInferenceThread, HeatMapGenerationThread,PolygonProcessThread
 from shape import Shape
 from ImageGraphicsView import ImageGraphicsView
+from canvas import process_polygon_data
+import traceback
 
 class BatchProcessor:
     def __init__(self, main_window):
@@ -666,23 +668,30 @@ class BatchProcessor:
             progress_dialog.update_status(f"标签页 {tab_index + 1} 热图生成出错: {str(e)}")
             results["operations"]["heatmap"]["failed"] += 1
     
+# 修改_process_yolo_results方法
+
     def _process_yolo_results(self, results, file_path, canvas):
-        """处理YOLO推理结果并将其添加到指定的Canvas上"""
+        """处理YOLO推理结果并将其添加到指定的Canvas上，包含与主文件一致的处理逻辑"""
         try:
-            shapes = []
-            
+            # 创建用于存储box类型形状的列表
+            box_shapes = []
             # 检查结果是否有效
             if not results:
-                return
+                return []
+            
+            # 处理输出目录
+            output_dir = self.main_window.inference_settings.get("save_path", os.path.join(os.getcwd(), "Inference_OutPut")) if hasattr(self.main_window, 'inference_settings') else os.path.join(os.getcwd(), "Inference_OutPut")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 标记是否有segments类型的数据
+            has_segments = False
             
             # 处理每个结果
             for result in results:
                 json_str = result.to_json()
                 json_obj = json.loads(json_str)
                 
-                # 保存JSON文件
-                output_dir = self.main_window.inference_settings.get("save_path", os.path.join(os.getcwd(), "OutPut")) if hasattr(self.main_window, 'inference_settings') else os.path.join(os.getcwd(), "OutPut")
-                os.makedirs(output_dir, exist_ok=True)
+                # 生成并保存JSON文件
                 json_file_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(result.path))[0]}.json")
                 
                 with open(json_file_path, 'w') as json_file:
@@ -690,72 +699,103 @@ class BatchProcessor:
                 
                 # 处理JSON对象中的形状数据
                 if isinstance(json_obj, list):
-                    class_counts = defaultdict(int)  # 初始化计数器
+                    image_size = canvas.image_size
+                    image_width = image_size.width()
+                    image_height = image_size.height()
+                    
+                    # 处理类别计数，与主文件保持一致
+                    class_counts = defaultdict(int)
+                    
+                    # 直接处理box类型的项目
                     for item in json_obj:
-                        # 生成POLYGON
-                        if 'segments' in item:
-                            x_coords = item['segments'].get('x', [])
-                            y_coords = item['segments'].get('y', [])
-                            if len(x_coords) != len(y_coords):
-                                continue
-                            
-                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
-                            label = item.get('name', 'undefined')
-                            classnum = item.get('class', 0)
-                            
-                            # 分配group_id
-                            group_id = class_counts[classnum]
-                            class_counts[classnum] += 1
-                            
-                            shape = Shape(label=label, classnum=classnum,
-                                        pointslist=pointslist, shape_type='polygon', group_id=group_id,
-                                        scale_factor=canvas.scale_factor)
-                            shapes.append(shape)
-                        
-                        # 添加矩形框处理 - 这部分在批处理中缺失
-                        elif 'segments' not in item and 'box' in item:
+                        # 仅处理box类型
+                        if 'segments' not in item and 'box' in item:
                             box = item['box']
                             x1, y1 = box.get('x1', 0), box.get('y1', 0)
                             x2, y2 = box.get('x2', 0), box.get('y2', 0)
                             top_left = QPointF(x1, y1)
                             bottom_right = QPointF(x2, y2)
                             label = item.get('name', 'undefined')
-                            classnum = item.get('class', 0)
+                            classnum = item.get('class', 'undefined')
                             
-                            # 分配 group_id
+                            # 分配group_id与主文件保持一致
                             group_id = class_counts[classnum]
                             class_counts[classnum] += 1
                             
-                            shape = Shape(label=label, classnum=classnum,
-                                        pointslist=[top_left, bottom_right], 
-                                        shape_type='rectangle', group_id=group_id,
-                                        scale_factor=canvas.scale_factor)
-                            shapes.append(shape)
-                
-                # 将形状添加到画布
-                canvas.shapes.extend(shapes)
-                canvas.update()
-                
-                # 更新UI - 使用主窗口中已定义的更完整方法
-                self.main_window.labeldockinstance.populate(canvas.shapes, Shape.get_color_by_classnum)
-                self.main_window.shapedockinstance.populate(canvas.shapes)
-                
-                # 设置为编辑模式 - 这一步在批处理中缺失
-                canvas.set_mode('edit')
-                
-                # 这两行代码可能需要放在批处理的主流程中而不是这里，因为它们会影响UI状态
-                # self.main_window.actionEditShapes.setChecked(True)
-                # self.main_window.edit_shapes()
-                
-                return shapes
+                            # 创建矩形形状
+                            shape = Shape(
+                                label=label, 
+                                classnum=classnum,
+                                pointslist=[top_left, bottom_right], 
+                                shape_type='rectangle', 
+                                group_id=group_id,
+                                scale_factor=canvas.scale_factor
+                            )
+                            box_shapes.append(shape)
+                        
+                        # 检查是否有多边形(segments)数据
+                        elif 'segments' in item:
+                            has_segments = True
+                            
+                    # 如果存在segments类型数据，在批处理中我们直接处理它们
+                    # 因为在批处理中启动新线程并等待可能会造成UI阻塞
+                    if has_segments:
+                        # 收集所有具有segments的项
+                        segment_items = [item for item in json_obj if 'segments' in item]
+                        if segment_items:
+                            # 按classnum分组收集坐标
+                            polygons_by_class = {}
+                            for item in segment_items:
+                                x_coords = item['segments'].get('x', [])
+                                y_coords = item['segments'].get('y', [])
+                                if len(x_coords) != len(y_coords):
+                                    continue
+                                    
+                                classnum = item.get('class', 'undefined')
+                                if classnum not in polygons_by_class:
+                                    polygons_by_class[classnum] = []
+                                
+                                polygons_by_class[classnum].append((x_coords, y_coords))
+                            
+                            # 在批处理中，直接处理多边形数据而不启动新线程
+                            if polygons_by_class:
+                                # 调用处理函数
+                                processed_map = process_polygon_data(
+                                    polygons_by_class, image_width, image_height)
+                                
+                                # 处理结果转换为Shape对象
+                                for classnum, polygons in processed_map.items():
+                                    for i, (pointsx, pointsy) in enumerate(polygons):
+                                        points = [QPointF(x, y) for x, y in zip(pointsx, pointsy)]
+                                        if len(points) >= 3:
+                                            # 创建多边形形状
+                                            shape = Shape(
+                                                label=f"class_{classnum}",
+                                                classnum=classnum,
+                                                pointslist=points,
+                                                shape_type='polygon',
+                                                group_id=i,
+                                                scale_factor=canvas.scale_factor
+                                            )
+                                            box_shapes.append(shape)
+            
+            # 将形状添加到画布
+            canvas.shapes.extend(box_shapes)
+            canvas.update()
+            
+            # 更新UI - 使用主窗口中已定义的更完整方法
+            self.main_window.labeldockinstance.populate(canvas.shapes, Shape.get_color_by_classnum)
+            self.main_window.shapedockinstance.populate(canvas.shapes)
+            
+            # 设置为编辑模式
+            canvas.set_mode('edit')
+            
+            return box_shapes
                 
         except Exception as e:
             print(f"Error processing YOLO results: {str(e)}")
-            import traceback
             print(traceback.format_exc())
             return []
-            
-
 
     def _display_results_summary(self, tab_count, results, options):
         """显示批处理结果摘要"""

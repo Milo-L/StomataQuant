@@ -225,6 +225,7 @@ class BatchProcessingDialog(QDialog):
             self.parent.load_model()
             # 延迟更新模型信息，确保模型加载完成
             QTimer.singleShot(500, self.update_model_info)
+
     def update_model_info(self):
         """更新模型信息显示"""
         if hasattr(self.parent, 'model') and self.parent.model:
@@ -567,7 +568,7 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         self.imgsz_spinbox.setValue(settings.get("imgsz", 1024))
         self.max_det_spinbox.setValue(settings.get("max_det", 500))
         
-        self.save_path_edit.setText(settings.get("save_path", os.path.join(os.getcwd(), "OutPut")))
+        self.save_path_edit.setText(settings.get("save_path", os.path.join(os.getcwd(), "Inference_OutPut")))
         
     def load_default_settings(self):
         self.conf_spinbox.setValue(0.5)
@@ -575,7 +576,7 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         self.device_combobox.setCurrentText("GPU" if self.gpu_available else "CPU")
         self.imgsz_spinbox.setValue(1024)  # 默认图像大小
         self.max_det_spinbox.setValue(500)  # 默认最大检测数量
-        self.save_path_edit.setText(os.path.join(os.getcwd(), "OutPut"))
+        self.save_path_edit.setText(os.path.join(os.getcwd(), "Inference_OutPut"))
 
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout()
@@ -647,7 +648,7 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
 
         self.save_path_label = QtWidgets.QLabel("Save results file path:")
         self.save_path_edit = QtWidgets.QLineEdit()
-        self.save_path_edit.setText(os.path.join(os.getcwd(), "OutPut"))  # 默认保存路径
+        self.save_path_edit.setText(os.path.join(os.getcwd(), "Inference_OutPut"))  # 默认保存路径
         self.save_path_button = QtWidgets.QPushButton("Browse")
         self.save_path_button.clicked.connect(self.browse_save_path)
         save_path_layout = QtWidgets.QHBoxLayout()

@@ -38,11 +38,10 @@ from ultralytics import YOLO
 from AllDialogs import InferenceSettingsDialog,SetMeasuringScaleDialog,LabelInputDialog,ProgressDialog,ColorSettingsDialog,HeatMapDialog,BatchProcessingDialog,BatchProgressDialog
 from ImageGraphicsView import ImageGraphicsView
 from shape import *
-from canvas import Canvas, USE_NUMBA, check_numba
+from canvas import Canvas, USE_NUMBA, check_numba,process_polygon_data
 from dock_widgets import ShapeListDock, LabelListDock,MeasuredResultsDock,ImageResultsSummaryDock
-from InferenceThread import YOLOSegInferenceThread,ABorADInferenceThread, HeatMapGenerationThread
+from InferenceThread import YOLOSegInferenceThread,PolygonProcessThread,ABorADInferenceThread, HeatMapGenerationThread
 from BatchProcessor import BatchProcessor, BatchExporter, BatchImporter
-
 
 #############################################################################################################
 # UIMainWindow
@@ -1440,16 +1439,41 @@ class UIMainWindow(MainWindow):
     #################################################################
 
     ### 模型选择函数，对应模型选择按钮 Model selection function, corresponding to the model selection button
+    # def load_model(self):
+    #     options = QFileDialog.Options()
+    #     model_path, _ = QFileDialog.getOpenFileName(self, "Select the YOLO model file", "", "Model Files (*.pt *.onnx);;All Files (*)", options=options)
+    #     if model_path:
+    #         try:
+    #             self.model = YOLO(model_path)  # Load the YOLO model
+    #             QMessageBox.information(self, "Model loading success", f"The model has been successfully loaded：{model_path.split('/')[-1]}")
+    #             print(f"The model has been successfully loaded：{model_path,self.model.model_name}")  # 调试输出
+    #         except Exception as e:
+    #             QMessageBox.critical(self, "Model loading failure", f"Unable to load model：{str(e)}")
     def load_model(self):
         options = QFileDialog.Options()
-        model_path, _ = QFileDialog.getOpenFileName(self, "Select the YOLO model file", "", "Model Files (*.pt *.onnx);;All Files (*)", options=options)
+        model_path, _ = QFileDialog.getOpenFileName(self, "Select the YOLO model file", "",
+                                                    "Model Files (*.pt *.onnx);;All Files (*)", options=options)
         if model_path:
             try:
-                self.model = YOLO(model_path)  # Load the YOLO model
-                QMessageBox.information(self, "Model loading success", f"The model has been successfully loaded：{model_path.split('/')[-1]}")
-                print(f"The model has been successfully loaded：{model_path,self.model.model_name}")  # 调试输出
+                # 检查是否已经加载了模型，释放旧模型资源
+                if hasattr(self, 'model') and self.model is not None:
+                    try:
+                        del self.model
+                        self.model = None
+                        gc.collect()
+                        print('The old model has been released successfully.')
+                    except Exception as e:
+                        print(f"An error occurred while releasing the resources of the old model: {e}")
+
+                # 加载新模型
+                self.model = YOLO(model_path)
+                model_name = model_path.split('/')[-1] if '/' in model_path else model_path.split('\\')[-1]
+                QMessageBox.information(self, "Model loading success",
+                                        f"The model has been successfully loaded: {model_name}")
+                print(f"The model has been successfully loaded: {model_path}, {self.model.model_name}")
+
             except Exception as e:
-                QMessageBox.critical(self, "Model loading failure", f"Unable to load model：{str(e)}")
+                QMessageBox.critical(self, "Model loading failure", f"Unable to load model: {str(e)}")
 
     ### 关于推理设置的函数，其使用了InferenceSettingsDialog类，对应推理设置按钮
     ### Regarding the function for setting up the inference, it utilizes the InferenceSettingsDialog class, which corresponds to the inference settings button.
@@ -1497,7 +1521,7 @@ class UIMainWindow(MainWindow):
             # 显示进度对话框
             self.progress_dialog = ProgressDialog(self)
             self.progress_dialog.show()
-            self.progress_dialog.update_message("Running image analysis...")
+            self.progress_dialog.update_message("Running inference...")
 
             # 如果推断设置为空，则加载默认值
             if not self.inference_settings:
@@ -1505,7 +1529,7 @@ class UIMainWindow(MainWindow):
                     "conf": 0.5,
                     "iou": 0.7,
                     "device": "cpu",
-                    "save_path": os.path.join(os.getcwd(), "OutPut"),
+                    "save_path": os.path.join(os.getcwd(), "Inference_OutPut"),
                     "imgsz": 1024,
                     "max_det": 500
                 }
@@ -1523,53 +1547,53 @@ class UIMainWindow(MainWindow):
     ###  完成推理后的一些任务，json 文件生成，shape 类的生成在推理完成后，以及释放不再使用的变量
     ### Some tasks after completing the inference, such as generating JSON files,
     ### generating Shape classes , and releasing variables that are no longer in use.
+    # 修改on_inference_finished函数
     def on_inference_finished(self, results, file_path, error):
         if error:
             QMessageBox.critical(self, "Error", f"An error occurs during the inference process: {error}")
-        else:
-            current_tab = self.tabWidget.currentWidget()
-            graphics_view = current_tab.property("graphics_view")
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.accept()
+            return
+
+        current_tab = self.tabWidget.currentWidget()
+        graphics_view = current_tab.property("graphics_view")
+        
         # 后处理进行导入shape
-        shapes = []  # 在方法开头定义 shapes 以确保其作用域
-        output_dir = self.inference_settings.get("save_path", os.path.join(os.getcwd(), "OutPut") )
+        self.box_shapes = []  # 存储box类型的形状，不需要线程处理
+        output_dir = self.inference_settings.get("save_path", os.path.join(os.getcwd(), "Inference_OutPut"))
         os.makedirs(output_dir, exist_ok=True)
+        
+        # 更新进度条消息
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.update_message("Processing the inference results...")
+        
+        # 记录需要处理的结果数
+        self.remaining_results = len(results)
+        
+        has_segments = False  # 标记是否有segments类型的数据
+        
         for result in results:
             json_str = result.to_json()
-            json_obj = json.loads(json_str)#将 JSON 字符串解析为 Python 字典对象
+            json_obj = json.loads(json_str)  # 将 JSON 字符串解析为 Python 字典对象
             # 生成 JSON 文件路径：
             json_file_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(result.path))[0]}.json")
             # 根据保存路径进行保存JSON文件
             with open(json_file_path, 'w') as json_file:
-                # 并使用 4 个空格缩进格式化输出。
                 json.dump(json_obj, json_file, indent=4)
             
             print(f'json文件保存至:{json_file_path}')  
         
             if isinstance(json_obj, list):
-                class_counts = defaultdict(int)  # 初始化计数器
+                current_canvas = graphics_view.canvas
+                image_size = current_canvas.image_size
+                image_width = image_size.width()
+                image_height = image_size.height()
+                
+                # 直接处理box类型的项目
+                class_counts = defaultdict(int)  # 用于追踪各个类别的group_id
                 for item in json_obj:
-                    ### 生成POLYGON
-                    if 'segments' in item:
-                        x_coords = item['segments'].get('x', [])
-                        y_coords = item['segments'].get('y', [])
-                        if len(x_coords) != len(y_coords):
-                            QMessageBox.warning(self, "Error", "The number of x and y coordinates do not match.")
-                            continue
-                        pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
-                        label = item.get('name', 'undefined')
-                        classnum = item.get('class', 'undefined')
-                        
-                        # 分配 group_id
-                        group_id = class_counts[classnum]
-                        class_counts[classnum] += 1
-                        
-                        shape = Shape(label=label, classnum=classnum,
-                                       pointslist=pointslist, shape_type='polygon', group_id=group_id,
-                                       scale_factor=graphics_view.canvas.scale_factor)
-                        shapes.append(shape)
-
-                    ### 生成RECTANGLE
-                    elif 'segments' not in item and 'box' in item:
+                    if 'segments' not in item and 'box' in item:
+                        # 处理box类型，无需线程处理
                         box = item['box']
                         x1, y1 = box.get('x1', 0), box.get('y1', 0)
                         x2, y2 = box.get('x2', 0), box.get('y2', 0)
@@ -1582,42 +1606,184 @@ class UIMainWindow(MainWindow):
                         group_id = class_counts[classnum]
                         class_counts[classnum] += 1
                         
-                        shape = Shape(label=label, classnum=classnum,
-                                       pointslist=[top_left, bottom_right], 
-                                       shape_type='rectangle', group_id=group_id,
-                                       scale_factor=graphics_view.canvas.scale_factor)      
-                        shapes.append(shape)
+                        shape = Shape(
+                            label=label, 
+                            classnum=classnum,
+                            pointslist=[top_left, bottom_right], 
+                            shape_type='rectangle', 
+                            group_id=group_id,
+                            scale_factor=graphics_view.canvas.scale_factor
+                        )
+                        self.box_shapes.append(shape)
+                        # 删除这里的调用，避免循环中重复更新UI
+                        # self.finish_processing_shapes(self.box_shapes)
+
+                    elif 'segments' in item:
+                        # 收集segments类型数据并按类别分组
+                        has_segments = True
+                        segment_items = [item for item in json_obj if 'segments' in item]
+                        if segment_items:
+                            # 按classnum分组收集坐标
+                            polygons_by_class = {}
+                            for item in segment_items:
+                                x_coords = item['segments'].get('x', [])
+                                y_coords = item['segments'].get('y', [])
+                                if len(x_coords) != len(y_coords):
+                                    continue
+                                    
+                                classnum = item.get('class', 'undefined')
+
+                                
+                                if classnum not in polygons_by_class:
+                                    polygons_by_class[classnum] = []
+                                
+                                polygons_by_class[classnum].append((x_coords, y_coords))
+                        
+                            # 只有当有多边形数据时才启动线程处理
+                            if polygons_by_class:
+                                # 更新进度条消息
+                                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                                    self.progress_dialog.update_message("Processing polygon data...")
+                                
+                                self.polygon_thread = PolygonProcessThread(
+                                    polygons_by_class, image_width, image_height, json_obj, self)
+                                self.polygon_thread.processingFinished.connect(self.on_polygon_processing_finished)
+                                self.polygon_thread.start()
+                                return  # 提前返回，等待线程处理完成
                     else:
-                        QMessageBox.warning(self, "Error", "The JSON structure does not conform to expectations.")
-
+                        QMessageBox.warning(self, "Error", "There is an error in the Json data structure.")
+                        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                            self.progress_dialog.accept()
             
-
             else:
                 QMessageBox.warning(self, "Error", "Unknown Error Occurred During the Process of Parsing Json.")
-       
-        # **将 shapes 存储到当前标签页的canvas中**
-        current_canvas = self.get_current_graphics_view().canvas
-        current_canvas.shapes.extend(shapes)
-        current_canvas.update()
-
-           # 更新列表
-        self.labeldockinstance.populate(current_canvas.shapes, Shape.get_color_by_classnum)
-        self.shapedockinstance.populate(current_canvas.shapes)
-
-        # 设置模式为 edit 模式
-
-        self.get_current_graphics_view().canvas.set_mode('edit')
-
-        # 模拟按下 edit 按钮
-        self.actionEditShapes.setChecked(True)
-        self.edit_shapes()
+                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                    self.progress_dialog.accept()
+        
+        # 只有在没有segments类型数据时，才在这里处理box shapes
+        if not has_segments and self.box_shapes:
+            self.finish_processing_shapes(self.box_shapes)
 
 
-        # 更新进度条窗口的消息
-        self.progress_dialog.update_message("Image analysis completed")
-        # 关闭进度条窗口
-        self.progress_dialog.accept()
-        self.update_actions_inToolBar()
+    def on_polygon_processing_finished(self, processed_map, json_obj, error):
+        if error:
+            QMessageBox.warning(self, "Error", f"An error occurred during polygon processing: {error}")
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.accept()
+            return
+        
+        try:      
+            # 获取当前的画布和视图
+            current_tab = self.tabWidget.currentWidget()
+            graphics_view = current_tab.property("graphics_view")
+            current_canvas = graphics_view.canvas
+            
+            polygon_shapes = []  # 用于存储从多边形数据创建的形状
+            class_counts = defaultdict(int)  # 初始化计数器
+            
+            # 处理多边形数据
+            class_index_map = defaultdict(int)  # 用于跟踪每个类别内的索引
+            
+            # 处理每个json项
+            for item in json_obj:
+                if 'segments' in item:
+                    classnum = item.get('class', 'undefined')
+                    current_index = class_index_map[classnum]
+                    class_index_map[classnum] += 1
+                    
+                    # 获取多边形坐标
+                    pointslist = None
+                    
+                    # 尝试获取处理后的数据
+                    if classnum in processed_map:
+                        processed_data = processed_map[classnum]
+                        
+                        # 处理数据结构差异 (列表或字典)
+                        if isinstance(processed_data, list) and current_index < len(processed_data):
+                            x_coords, y_coords = processed_data[current_index]
+                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
+                        elif isinstance(processed_data, dict) and current_index in processed_data:
+                            x_coords, y_coords = processed_data[current_index]
+                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
+                    
+                    # 如果没有找到处理后的数据，使用原始数据
+                    if pointslist is None:
+                        x_coords = item['segments'].get('x', [])
+                        y_coords = item['segments'].get('y', [])
+                        if len(x_coords) == len(y_coords):  # 确保坐标数量匹配
+                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
+                        else:
+                            continue  # 跳过坐标不匹配的情况
+                    
+                    if not pointslist:
+                        continue  # 跳过空坐标的情况
+                    
+                    # 创建形状对象
+                    label = item.get('name', 'undefined')
+                    group_id = class_counts[classnum]
+                    class_counts[classnum] += 1
+                    
+                    shape = Shape(
+                        label=label, 
+                        classnum=classnum,
+                        pointslist=pointslist, 
+                        shape_type='polygon', 
+                        group_id=group_id,
+                        scale_factor=graphics_view.canvas.scale_factor
+                    )
+                    polygon_shapes.append(shape)
+            
+            # 合并多边形形状和之前处理的box形状
+            all_shapes = polygon_shapes 
+
+            # 完成处理
+            self.finish_processing_shapes(all_shapes)
+            
+        except Exception as e:
+            print(f"Error in on_polygon_processing_finished: {str(e)}")
+            print(traceback.format_exc())
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.accept()
+            QMessageBox.warning(self, "Error", f"处理多边形结果时出错: {str(e)}")
+
+    # 添加一个新的辅助方法来完成处理
+    def finish_processing_shapes(self, shapes):
+        """完成形状处理并更新UI"""
+        try:
+            # 获取当前的画布
+            current_tab = self.tabWidget.currentWidget()
+            graphics_view = current_tab.property("graphics_view")
+            current_canvas = graphics_view.canvas
+            
+            # 将 shapes 存储到当前标签页的canvas中
+            current_canvas.shapes.extend(shapes)
+            current_canvas.update()
+            
+            # 更新列表
+            self.labeldockinstance.populate(current_canvas.shapes, Shape.get_color_by_classnum)
+            self.shapedockinstance.populate(current_canvas.shapes)
+            
+            # 设置模式为 edit 模式
+            current_canvas.set_mode('edit')
+            
+            # 模拟按下 edit 按钮
+            self.actionEditShapes.setChecked(True)
+            self.edit_shapes()
+            
+            # 更新进度条窗口的消息
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.update_message("Image analysis completed")
+                # 关闭进度条窗口
+                self.progress_dialog.accept()
+                
+            self.update_actions_inToolBar()
+        except Exception as e:
+            print(f"Error in finish_processing_shapes: {str(e)}")
+            print(traceback.format_exc())
+            if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                self.progress_dialog.accept()
+            QMessageBox.warning(self, "Error", f"完成形状处理时出错: {str(e)}")
+
 
     #################################################################
     # ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
