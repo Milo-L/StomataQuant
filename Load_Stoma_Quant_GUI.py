@@ -1339,9 +1339,6 @@ class UIMainWindow(MainWindow):
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Select image files", "",
                                                     "Image Files (*.png *.jpg *.jpeg *.bmp *.tif);;All Files (*)",
                                                     options=options)
-        print("=====================================")  # 调试信息
-        print("open_file called")  # 调试信息
-        print("=====================================")  # 调试信息
         for file_path in file_paths:
             if file_path and file_path not in self.opened_files:
                 print(f"LOAD IMAGE: {file_path} from open_file method")  # 调试信息
@@ -1689,6 +1686,7 @@ class UIMainWindow(MainWindow):
                 self.progress_dialog.accept()
             return
 
+        
         current_tab = self.tabWidget.currentWidget()
         graphics_view = current_tab.property("graphics_view")
         
@@ -1716,7 +1714,16 @@ class UIMainWindow(MainWindow):
                 json.dump(json_obj, json_file, indent=4)
             
             print(f'json文件保存至:{json_file_path}')  
-        
+            if json_obj in [None, {},[]]:
+                QMessageBox.warning(
+                self,
+                "Notice",
+                "The model did not return any inference results. This might be because the  confidence is too high or the model is unable to identify the target in the image."
+            )
+                if hasattr(self, 'progress_dialog') and self.progress_dialog:
+                    self.progress_dialog.accept()
+                return
+
             if isinstance(json_obj, list):
                 current_canvas = graphics_view.canvas
                 image_size = current_canvas.image_size

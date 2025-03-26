@@ -391,6 +391,7 @@ class BatchProcessor:
             if batch_results["error"]:
                 progress_dialog.update_status(f"Error in tab {tab_index + 1}: {batch_results['error']}")
                 results["operations"]["ai"]["failed"] += 1
+                
             else:
                 # 手动处理结果
                 self._process_yolo_results(batch_results["results"], file_path, graphics_view.canvas)

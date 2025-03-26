@@ -2,7 +2,6 @@
 from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene,QGraphicsPixmapItem
 from PyQt5.QtCore import pyqtSignal, Qt, QRectF
 from PyQt5.QtGui import QPixmap,QImageReader
-from sympy import im
 from canvas import Canvas
 import os   
 
