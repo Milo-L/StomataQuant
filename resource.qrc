@@ -1,0 +1,8 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/">
+    <file>ICON.png</file>
+    <file>Start_up.png</file>
+    <file>Cls_best.pt</file>
+  </qresource>
+</RCC>
