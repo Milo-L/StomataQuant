@@ -1,3 +1,4 @@
+<!-- markdownlint-disable -->
 <p align="center">
 <img src="readme_medias\0_title.jpg" alt="0_title" width="80%">
 </p>
