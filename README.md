@@ -271,10 +271,9 @@
     <img src="readme_medias\3c_create_line.gif" alt="3c_create_line" width="32%">
     <img src="readme_medias\3c_create_point.gif" alt="3c_create_point" width="32%">
     </p>
-    </details>
-
-<details>
+</details>
 <a id="shape-editing"></a>
+<details>
 <summary style="padding-left: 1.5em;"><strong>Shape Editing</strong></summary>
 
 - Supports editing **polygons, rotated rectangles, rectangles, lines, and points.**
@@ -321,10 +320,9 @@
     - Also supports **exporting shape annotations** for all images currently open in tabs;
     - Also supports **batch importing annotations** and opening images.
     - Currently, annotation import and export only supports **YOLO format** for **Rectangle, RotatedRectangle (OBB), and Polygon**.
-    </details>
-
-<details>
+</details>
 <a id="train-a-new-model"></a>
+<details>
 <summary style="padding-left: 1.5em;"><strong>Training New Models and Contributing</strong></summary>
 
 - To train a new model or fine-tune an existing one, please refer to the official [Ultralytics training documentation](https://docs.ultralytics.com/modes/train/), which offers comprehensive guidance on dataset preparation, training parameter configuration, and the training process itself.
