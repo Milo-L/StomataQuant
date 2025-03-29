@@ -340,7 +340,7 @@
 - Dataset for the stoma and pore segemetation model | [Download]()
 - Dataset for the stoma and pavement cell segmentaion model | [Download]()
 <p align="center">
-<img src="readme_medias\4_dataset.jpg" alt="4_dataset" width="40%">
+<img src="readme_medias\4_dataset.jpg" alt="4_dataset" width="70%">
 </p>
 
 
