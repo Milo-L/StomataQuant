@@ -370,7 +370,7 @@
 <a id="contact-us"></a>
 <summary style="font-size:1.5em;font-weight:bold;">🤝 Contact Us</summary>
 
-- For any questions or suggestions, please submit an [issue](https://github.com/Milo-L/StomataQuant/issues) or contact [Menglong Liu](https://github.com/Milo-L/) ([milo.liu@stu.pku.edu.cn](mailto:milo.liu@stu.pku.edu.cn))or  [Dr. Yin Wang](https://www.researchgate.net/profile/Yin-Wang-78) ([wangyinpku@pku.edu.cn](mailto:wangyinpku@pku.edu.cn)).
+- For any questions or suggestions, please submit an [issue](https://github.com/Milo-L/StomataQuant/issues) or contact [Menglong Liu](https://github.com/Milo-L/) ([milo.liu@stu.pku.edu.cn](mailto:milo.liu@stu.pku.edu.cn)) or [Dr. Yin Wang](https://www.researchgate.net/profile/Yin-Wang-78) ([wangyinpku@pku.edu.cn](mailto:wangyinpku@pku.edu.cn)).
 
 ---
 <p align="center">
