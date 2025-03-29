@@ -156,7 +156,7 @@
 <summary style="padding-left: 1.5em;"><strong>04. Confirm Inference Results (Optional)</strong></summary>
 
 - Confirm whether the inference results are correct
-- If errors occur, the corresponding shapes can be [edited](#common_usage_scenarios) manually
+- If errors occur, the corresponding shapes can be [edited](#shape-editing) manually
 </details>
 
 <details>
@@ -274,12 +274,14 @@
     </details>
 
 <details>
+<a id="shape-editing"></a>
 <summary style="padding-left: 1.5em;"><strong>Shape Editing</strong></summary>
 
 - Supports editing **polygons, rotated rectangles, rectangles, lines, and points.**
     - After selecting a shape, click the `Delete` button or press the `Delete` or `Backspace` key on the keyboard to delete it;
     - Press `Ctrl + C` or the `Duplicate` button to copy the shape;
     - `Left-click` and drag the inside of a shape to move it.
+
 - **Edit Polygon:**
     - `Left-click` and drag an endpoint to move it;
     - Right-click on an endpoint to delete the vertex;
@@ -314,14 +316,21 @@
 <details>
 <summary style="padding-left: 1.5em;"><strong>Shape Annotation Import and Export</strong></summary>
 
-- The ability to import or save annotations from external sources is crucial, whether for archiving measurement results or for accumulating data to train and fine-tune future models.
+- The ability to import or save annotations from external sources is crucial, whether for archiving measurement results or for accumulating data to [train and fine-tune future models](#train-a-new-model).
     - Supports importing and exporting annotations for a **single image**;
     - Also supports **exporting shape annotations** for all images currently open in tabs;
     - Also supports **batch importing annotations** and opening images.
-    - Currently, annotation import and export only supports **YOLO format** for **Rectangle, RotatedRectangle (OBB), and polygon**.
+    - Currently, annotation import and export only supports **YOLO format** for **Rectangle, RotatedRectangle (OBB), and Polygon**.
     </details>
 
+<details>
+<a id="train-a-new-model"></a>
+<summary style="padding-left: 1.5em;"><strong>Training New Models and Contributing</strong></summary>
 
+- To train a new model or fine-tune an existing one, please refer to the official [Ultralytics training documentation](https://docs.ultralytics.com/modes/train/), which offers comprehensive guidance on dataset preparation, training parameter configuration, and the training process itself.
+
+- **If you're interested in contributing to StomataQuant, you can prepare annotated datasets and [contact us](#contact-us). We plan to release next-generation models for community use in the future.**
+</details>
 
 ---
 <a id="dataset-used-for-training-the-model"></a>
