@@ -1,6 +1,6 @@
 <!-- markdownlint-disable -->
 <p align="center">
-<img src="readme_medias\0_title.jpg" alt="0_title" width="80%">
+<img src="readme_medias\0_title.jpg" alt="0_title" width="100%">
 </p>
 
 <summary style="font-size:1.5em;font-weight:bold;"> 📑 Table of contents</summary>
@@ -107,7 +107,7 @@
     - Generates feature distribution heatmaps for intuitive visualization of analysis results (as depicted in follwing figure ).
 
 <p align="center">
-<img src="readme_medias\3_heatmap_generated_by_StomataQuant.jpg" alt="3_heatmap_generated_by_StomataQuant" width="50%">
+<img src="readme_medias\3_heatmap_generated_by_StomataQuant.jpg" alt="3_heatmap_generated_by_StomataQuant" width="70%">
 </p>
 </details>
 
@@ -120,7 +120,7 @@
 + Select the images to be analyzed
 + The images will be displayed in the main window and can be managed through tabs
 <p align="center">
-<img src="readme_medias\3_openfile.gif" alt="3_openfile" width="50%">
+<img src="readme_medias\3_openfile.gif" alt="3_openfile" width="70%">
 </p>
 </details>
 
@@ -177,7 +177,7 @@
 <details>
 <summary style="padding-left: 1.5em;"><strong>Workflow Summmary</strong></summary>
 <p align="center">
-<img src="readme_medias\3_workflow.jpg" alt="3_workflow" width="50%">
+<img src="readme_medias\3_workflow.jpg" alt="3_workflow" width="70%">
 </p>
 </details>
 
@@ -197,7 +197,7 @@
     3. After editing, click `Feature Extraction` to quickly obtain stomatal aperture and size data.
 
 <p align="center">
-<img src="readme_medias\3_rapid_stomatal_apeature.gif" alt="3_rapid_stomatal_apeature" width="50%">
+<img src="readme_medias\3_rapid_stomatal_apeature.gif" alt="3_rapid_stomatal_apeature" width="70%">
 </p>
 </details>
 
@@ -209,7 +209,7 @@
 - Next confirm and count the cells by adding or deleting points;
 - Finally, calculate the stomatal index based on the number of stomata and pavement cells.
 <p align="center">
-<img src="readme_medias\3_rapid_stomatal_index.gif" alt="3_rapid_stomatal_index" width="50%">
+<img src="readme_medias\3_rapid_stomatal_index.gif" alt="3_rapid_stomatal_index" width="70%">
 </p>
 </details>
 
@@ -221,7 +221,7 @@
 - Select the **feature type** and **color scheme** for the heatmap, as well as the **output location**;
 - Then, wait for the generation of the heatmap.
 <p align="center">
-<img src="readme_medias\3_heatmap_generated.gif" alt="3_heatmap_generated" width="50%">
+<img src="readme_medias\3_heatmap_generated.gif" alt="3_heatmap_generated" width="70%">
 </p>
 </details>
 
@@ -374,5 +374,5 @@
 
 ---
 <p align="center">
-<img src="readme_medias\8_bottom.jpg" alt="8_bottom" width="80%">
+<img src="readme_medias\8_bottom.jpg" alt="8_bottom" width="100%">
 </p>
