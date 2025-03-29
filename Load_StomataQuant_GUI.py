@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
 from PyQt5.QtCore import Qt, QTimer, QEventLoop,QPluginLoader, QCoreApplication, QtMsgType, qInstallMessageHandler

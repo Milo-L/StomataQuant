@@ -41,30 +41,69 @@
    2. or download the [source code](#using-the-source-code) from GitHub.
 
 <a id="using-the-packaged-application"></a>
-
 <details>
 <summary style="padding-left: 1em;"><strong>💻 Using the Packaged Application</strong></summary>
 
 1. **Application Download**
     - **Windows**
-        + CPU only Application (**Recommended, Most Stable**) | [Download](https://disk.pku.edu.cn/link/AA3E99946022984C9DB11FF430F438B8FA)
-        + GPU Application (CUDA Version > 11.6) | [Download](https://disk.pku.edu.cn/link/AA3E99946022984C9DB11FF430F438B8FA)
+        + CPU only Application (**Recommended, Most Stable**) | [Download](https://disk.pku.edu.cn/link/AA76003FFFD0504A64AA7AD59352886DE4)| Extract Code: `WoRM`
+        + GPU Application (CUDA Version > 12.4) | [Download](https://disk.pku.edu.cn/link/AAD31BEA8CE1EE4C13991BE5F1C20C38F2) | Extract Code: `36Q2`
     - **macOS**
-        + CPU only Application | [Download]()
+        + CPU only Application | [Download](https://disk.pku.edu.cn/link/AA02FD45ED0CEB4845986A61DEE9D7592C) | Extract Code: `Axi5`
 
 2. **Model Weights Download**
-
-    + **All Models** | [Download]() 
-        + **Stomata Detection** | [Download]() 
-        + **Stoma and Pore Segmentation** | [Download]() 
-        + **Stoma and Pavement Cell Segmentation** | [Download]() 
+    + You can choose different types of models according to your task, and select different-sized models based on the performance of your computer, from **n**(nami), **s**(small), m(middle), **l**(large), **xl**(extral large).
+    - We recommend using the **xl**-sized model to achieve better inference results. However, the drawback is that without GPU acceleration, the inference time will be longer.
+    + **All Models** | [Download](https://disk.pku.edu.cn/link/AA67C4E18F5DCC4D47ACECB4638BECD038) 
+        + **Stomata Detection** | [Download](https://disk.pku.edu.cn/link/AABDB2D8A64C1047BC97E823E3551DCF8E) 
+        + **Stoma and Pore Segmentation** | [Download](https://disk.pku.edu.cn/link/AA420808C46B864347AD09C42E1133AA0F) 
+        + **Stoma and Pavement Cell Segmentation** | [Download](https://disk.pku.edu.cn/link/AADF39B88851B54E06AD9653CDC3028A6D) 
 
 3. **Before Running the Packaged Application (Preliminary Steps)**
-    + **Windows:** After downloading, extract the files to a folder. **Important:** Ensure that the file path contains no special characters or Chinese characters.
-        + Click the executable file to run the application.
+<details>
+    <summary style="padding-left: 3em;"><strong>Windows:</strong></summary>
 
-    + **macOS:** After downloading, you need to make the application executable.
-        + Open Terminal and navigate to the downloaded directory, then run the command: `chmod +x <application_name>` (replace `<application_name>` with the actual application file name).
+- After downloading, extract the files to a folder. 
+    - Using the default decompression tool provided by Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead.
+    - **Important:** Ensure that the file path contains **no special characters or Chinese characters.**
+    - The application's executable entry point, its original source code, and the embedded Python interpreter are all located within the `app` folder. Specifically, the `src` subfolder contains the original source code, while the `Python` subfolder houses a packaged, specific version of the Python interpreter.**Please refrain from renaming or modifying these folders unless you intend to alter the application's functionality.** 
+    - To run the application without making any modifications, simply execute either `StomataQuant_c.exe` or `StomataQuant_GPU_c.exe`.
+
+<p align="center">
+<img src="readme_medias\2_windows_startup.gif" alt="2_windows_startup" width="70%">
+</p>
+
+</details>
+
+
+<details>
+    <summary style="padding-left: 3em;"><strong>MacOS:</strong></summary>
+
+
+- **After downloading, you need to make the application executable**
+1. Open the terminal. Navigate to the directory where you downloaded the file. Run the following command to make SQ_Mac executable:
+```bash
+chmod +x SQ_Mac
+```
+- This command grants **execute permissions** to the SQ_Mac file.
+
+2. Run the program. You might need to allow the program to run in your system's  Security & Privacy settings if it was downloaded from an external source. This is a standard macOS security measure.
+
+<p align="center">
+<img src="readme_medias\2_macos_download_chmod+x.gif" alt="2_macos_download_chmod+x" width="50%">
+<img src="readme_medias\2_mac_os_privacy.png" alt="2_mac_os_privacy" width="32%">
+</p>
+
+
+3. The program has begun to start up. A **terminal** window will appear, displaying program-related information. **You can minimize this window, but please do not close it.** Please wait for the program to launch. **Note: Startup on macOS might take longer as the system performs necessary checks and loads packages.**
+
+
+<p align="center">
+<img src="readme_medias\2_mac_os_cml_open.png" alt="2_mac_os_cml_open" width="40%">
+<img src="readme_medias\2_macos_startup.gif" alt="2_macos_startup" width="48%">
+</p>
+</details>
+
 </details>
 
 
@@ -74,13 +113,17 @@
 
 1. **Clone the repository**
     ```
-    git clone [https://github.com/Milo-L/Stomata-Quant.git](https://github.com/Milo-L/Stomata-Quant.git)
+    git clone https://github.com/Milo-L/Stomata-Quant.git
     ```
 2. **Install dependencies**
     ```
-    pip install -r requirements.txt
+    pip install -r SQ_gpu_requirements.txt
     ```
-3. **Run the application by your python interpreter**
+    or
+    ```
+    pip install -r SQ_cpu_requirements.txt
+    ```
+3. **Run the application by your python interpreter, and don't forget to download the necessary [model files](#using-the-packaged-application)**
     ```
     python Load_StomataQuant_GUI.py
     ```

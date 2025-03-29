@@ -398,7 +398,7 @@ class MainWindow(QMainWindow):
 
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
-        MainWindow.setWindowTitle(_translate("MainWindow", "Stoma Quant GUI"))
+        MainWindow.setWindowTitle(_translate("MainWindow", "StomataQuant GUI"))
         self.menuFile.setTitle(_translate("MainWindow", "File"))
         self.menuView.setTitle(_translate("MainWindow", "View"))
         # self.menuImage.setTitle(_translate("MainWindow", "图像"))
