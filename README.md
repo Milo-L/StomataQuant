@@ -15,6 +15,7 @@
   - [🕵️ Common usage scenarios](#common_usage_scenarios)
 - [📖 Dataset used for training the model](#dataset-used-for-training-the-model)
 - [🧩 Software Architecture](#technical-architecture)
+    - [🗃️ Code file structure](#code-file-structure)
 - [📜 License](#license)
 - [🤝 Contact Us](#contact-us)
 ---
@@ -386,7 +387,6 @@ chmod +x SQ_Mac
 <img src="readme_medias\4_dataset.jpg" alt="4_dataset" width="70%">
 </p>
 
-
 <a id="technical-architecture"></a>
 <summary style="font-size:1.5em;font-weight:bold;">🧩 Software Architecture</summary>
 
@@ -399,6 +399,54 @@ chmod +x SQ_Mac
     - [shapely](https://github.com/shapely/shapely)
 - **Program Acceleration**: [numba](https://github.com/numba/numba)
 - **Heatmap Visualization**: [Matplotlib](https://github.com/matplotlib/matplotlib)
+
+<a id="code-file-structure"></a>
+<details>
+<summary style="padding-left: 1em;"><strong>🗃️ Code file structure</strong></summary>
+
+- StomataQuant-GUI is designed with a **modular architecture**, consisting of the following key components:
+1. **Main Application Files**
+    - **`Load_StomataQuant_GUI.py`**: Entry point of the application, responsible for loading and initializing the main application window. Contains the `UIMainWindow` class that implements most core functionalities and event handling.
+    - **`StomataQuant_GUI.py`**: Contains the `MainWindow` class which sets up basic UI elements including menu bars, toolbars, status bars, and initial layouts.
+
+2. **Graphics and Drawing Components**
+    - **`shape.py`**: Defines the `Shape` class representing various graphical objects (polygons, rectangles, rotated rectangles, lines, points, etc.). Implements drawing, feature extraction, and geometric operation methods.
+    - **`canvas.py`**: Implements the `Canvas` class serving as the main drawing area. Handles mouse events, shape creation, editing, and user interactions.
+    - **`ImageGraphicsView.py`**: Provides the `ImageGraphicsView` class that manages image display, zooming, and image-related interaction functionalities.
+
+3. **Inference and Processing Components**
+    - **`InferenceThread.py`**: Contains thread implementations for AI and image processing:
+        - `YOLOSegInferenceThread`: Performs YOLO segmentation inference
+        - `PolygonProcessThread`: Processes polygon data
+        - `ABorADInferenceThread`: Performs AD and AB classification
+        - `HeatMapGenerationThread`: Generates heat maps
+
+4. **Interface Components**
+    - **`dock_widgets.py`**: Implements multiple dock windows:
+        - `ShapeListDock`: Displays current shape list
+        - `LabelListDock`: Manages labels
+        - `MeasuredResultsDock`: Shows measurement results of shapes
+        - `ImageResultsSummaryDock`: Displays image analysis summary
+
+5. **Batch Processing Functionality**
+    - **`BatchProcessor.py`**: Implements batch processing features:
+        - `BatchProcessor`: Performs operations on multiple tabs
+        - `BatchExporter`: Exports annotations in bulk
+        - `BatchImporter`: Imports annotations and images in bulk
+
+6. **Dialog Components**
+    - **`AllDialogs.py`**: Contains various dialogs:
+        - `BatchProcessingDialog`: Batch processing settings
+        - `BatchProgressDialog`: Batch processing progress display
+        - `InferenceSettingsDialog`: Inference settings
+        - `SetMeasuringScaleDialog`: Measurement scale settings
+        - `LabelInputDialog`: Label input
+        - `ColorSettingsDialog`: Color settings
+        - `HeatMapDialog`: Heat map generation settings
+
+7. **Resources**
+    - **`resources_rc.py`**: Contains compiled resources for the application (icons, images, etc.), generated from Qt Resource Collection (.qrc) files. Used to embed binary resources that can be accessed with the ":/resource_path" notation throughout the application.
+</details>
 
 
 <a id="license"></a>
