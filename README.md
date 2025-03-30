@@ -60,8 +60,10 @@
         + **Stoma and Pavement Cell Segmentation** | [Download](https://disk.pku.edu.cn/link/AADF39B88851B54E06AD9653CDC3028A6D) 
 
 3. **Before Running the Packaged Application (Preliminary Steps)**
+
+
 <details>
- <summary style="padding-left: 3em;"><strong>Windows:</strong></summary>
+<summary style="padding-left: 3em;"><strong>&nbsp;&nbsp;&nbsp;&nbsp; Windows:</strong></summary>
 
 - After downloading, extract the files to a folder. 
     - Using the default decompression tool provided by Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead.
@@ -77,7 +79,7 @@
 
 
 <details>
-<summary style="padding-left: 3em;"><strong>MacOS:</strong></summary>
+<summary style="padding-left: 3em;"><strong> &nbsp;&nbsp;&nbsp;&nbsp; MacOS:</strong></summary>
 
 
 - **After downloading, you need to make the application executable**
