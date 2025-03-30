@@ -69,7 +69,7 @@
 - After downloading, extract the files to a folder. 
     - Using the default decompression tool provided by Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead.
     - **Important:** Ensure that the file path contains **no special characters or Chinese characters.**
-    - The application's executable entry point, its original source code, and the embedded Python interpreter are all located within the `app` folder. Specifically, the `src` subfolder contains the original source code, while the `Python` subfolder houses a packaged, specific version of the Python interpreter.**Please refrain from renaming or modifying these folders unless you intend to alter the application's functionality.** 
+    - The application's executable entry point, its original source code, and the embedded Python interpreter are all located within the `app` folder. Specifically, the `src` subfolder contains the original source code, while the `Python` subfolder houses a packaged, specific version of the Python interpreter. **Please refrain from renaming or modifying these folders unless you intend to alter the application's functionality.** 
     - To run the application without making any modifications, simply execute either `StomataQuant_c.exe` or `StomataQuant_GPU_c.exe`.
 
 <p align="center">
