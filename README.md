@@ -399,7 +399,6 @@ chmod +x SQ_Mac
     - [shapely](https://github.com/shapely/shapely)
 - **Program Acceleration**: [numba](https://github.com/numba/numba)
 - **Heatmap Visualization**: [Matplotlib](https://github.com/matplotlib/matplotlib)
-
 <a id="code-file-structure"></a>
 <details>
 <summary style="padding-left: 1em;"><strong>🗃️ Code file structure</strong></summary>
