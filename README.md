@@ -22,7 +22,7 @@
 <a id="overview"></a>
 <summary style="font-size:1.5em;font-weight:bold;"> 🌏 Overview </summary>
 
-- **StomataQuant is a graphical user interface software specifically developed for processing and analyzing plant epidermal stomatal images.**
+- **StomataQuant is a graphical user interface (GUI) software specifically developed for processing and analyzing plant epidermal stomatal images.**
 - **It integrates deep learning and computer vision techniques to automatically detect, segment, and quantify stomata, pores, and pavement cells on plant epidermis, and provides detailed measurement data.**
 - **More importantly, StomataQuant also offers comprehensive and intuitive manual correction features, allowing users to directly adjust and edit the AI-generated results to ensure the accuracy and reliability of the analysis.**
 
@@ -39,7 +39,7 @@
 
 - **This program can be downloaded in two ways:**
    1. Download the [packaged application](#using-the-packaged-application) (**recommended for users without programming experience**); 
-   2. or download the [source code](#using-the-source-code) from GitHub.
+   2. Or download the [source code](#using-the-source-code) from GitHub.
 
 <a id="using-the-packaged-application"></a>
 <details>
@@ -53,7 +53,7 @@
         + CPU only Application | [Download](https://disk.pku.edu.cn/link/AA02FD45ED0CEB4845986A61DEE9D7592C) | Extract Code: `Axi5`
 
 2. **Model Weights Download**
-    + You can choose different types of models according to your task, and select different-sized models based on the performance of your computer, from **n**(nami), **s**(small), m(middle), **l**(large), **xl**(extral large).
+    + You can choose different types of models according to your task, and select different-sized models based on the performance of your computer, from **n**(nano), **s**(small), m(medium), **l**(large), **xl**(extra large).
     - We recommend using the **xl**-sized model to achieve better inference results. However, the drawback is that without GPU acceleration, the inference time will be longer.
     + **All Models** | [Download](https://disk.pku.edu.cn/link/AA67C4E18F5DCC4D47ACECB4638BECD038) 
         + **Stomata Detection** | [Download](https://disk.pku.edu.cn/link/AABDB2D8A64C1047BC97E823E3551DCF8E) 
@@ -67,9 +67,8 @@
 <summary style="padding-left: 3em;"><strong>&nbsp;&nbsp;&nbsp;&nbsp; Windows:</strong></summary>
 
 - After downloading, extract the files to a folder. 
-    - Using the default decompression tool provided by Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead.
-    - **Important:** Ensure that the file path contains **no special characters or Chinese characters.**
-    - The application's executable entry point, its original source code, and the embedded Python interpreter are all located within the `app` folder. Specifically, the `src` subfolder contains the original source code, while the `Python` subfolder houses a packaged, specific version of the Python interpreter. **Please refrain from renaming or modifying these folders unless you intend to alter the application's functionality.** 
+    - Using the default decompression tool provided by the Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead. **Important:** Ensure that the file path contains **no special characters or Chinese characters.**
+    - The app folder contains the executable, source code (in the `src` subfolder), and a specific Python interpreter (in the `Python` subfolder).**Do not rename or modify these folders unless you intend to change the application's functionality.**
     - To run the application without making any modifications, simply execute either `StomataQuant_c.exe` or `StomataQuant_GPU_c.exe`.
 
 <p align="center">
@@ -80,7 +79,7 @@
 
 
 <details>
-<summary style="padding-left: 3em;"><strong> &nbsp;&nbsp;&nbsp;&nbsp; MacOS:</strong></summary>
+<summary style="padding-left: 3em;"><strong> &nbsp;&nbsp;&nbsp;&nbsp; macOS:</strong></summary>
 
 
 - **After downloading, you need to make the application executable**
@@ -98,7 +97,7 @@ chmod +x SQ_Mac
 </p>
 
 
-3. The program has begun to start up. A **terminal** window will appear, displaying program-related information. **You can minimize this window, but please do not close it.** Please wait for the program to launch. **Note: Startup on macOS might take longer as the system performs necessary checks and loads packages.**
+3. Upon running the program, a **terminal** window will open to display program-related information. You can **minimize this window but do not close it**. Wait for the program to launch. Note that startup on macOS might take longer due to system checks and package loading."
 
 
 <p align="center">
@@ -116,7 +115,7 @@ chmod +x SQ_Mac
 
 1. **Clone the repository**
     ```
-    git clone https://github.com/Milo-L/Stomata-Quant.git
+    git clone https://github.com/Milo-L/StomataQuant.git
     ```
 2. **Install dependencies**
     ```
@@ -126,7 +125,7 @@ chmod +x SQ_Mac
     ```
     pip install -r SQ_cpu_requirements.txt
     ```
-3. **Run the application by your python interpreter, and don't forget to download the necessary [model files](#using-the-packaged-application)**
+3. **Run the application using your Python interpreter, and don't forget to download the necessary [model files](#using-the-packaged-application)**
     ```
     python Load_StomataQuant_GUI.py
     ```
@@ -140,17 +139,17 @@ chmod +x SQ_Mac
 <summary style="padding-left: 1em;"><strong>😎 Key Features</strong></summary>
 
 1. **AI-driven Detection and Segmentation:** 
-    - Integrates YOLO objective detection and segmentation models for automated stomata detection and stoma, pore and pavement cell segmentation.
+    - Integrates YOLO object detection and segmentation models for automated stomata detection and stoma, pore, and pavement cell segmentation.
 2. **Result Editing Capability:** 
     - Allows for manual verification and editing of AI inference outcomes.
 3. **Measurement and Analysis:**
-    - Extraction of shape features (e.g., count, area, perimeter and so on), with the specific features available varying depending on the shape type.
+    - Extraction of shape features such as count, area, perimeter, etc., with the available features varying depending on the shape type.
 4. **Comprehensive Annotation Tools and Management:**
     - Offers a variety of manual annotation tools, including polygons, rectangles, rotated rectangles, lines, and points, with integrated support for importing and exporting these annotation types.
 5. **Batch Processing Capability:** 
     - Allows for automated execution of model inference and analysis tasks on multiple loaded images.
 6. **Heatmap Generation:** 
-    - Generates feature distribution heatmaps for intuitive visualization of analysis results (as depicted in follwing figure ).
+    - Generates feature distribution heatmaps for intuitive visualization of analysis results (as depicted in following figure ).
 
 <p align="center">
 <img src="readme_medias\3_heatmap_generated_by_StomataQuant.jpg" alt="3_heatmap_generated_by_StomataQuant" width="70%">
@@ -174,22 +173,22 @@ chmod +x SQ_Mac
 <summary style="padding-left: 1.5em;"><strong>02. Select Model Based on Purpose</strong></summary>
 
 - Click `Setting`→`Model Setting`
-    - Focus on the number or distribution of stomata / measure stomatal density:
+    - If you are focusing on the number or distribution of stomata, or measuring stomatal density:
         - → Select `stomata detection model`
-        - The inference result is **rectangle** for the potential stomatal complex
-    - Focus on stomatal/pore size / measure stomatal aperture or size:
+        - The inference result will be **rectangle** bounding boxes around potential stomatal complexes.
+    - If you are focusing on stomatal or pore size, or measuring stomatal aperture or size:
         - → Select `stoma and pore segmentation model`
-        - The inference result is **polygon** for the potential stoma and its pore
-    - Focus on pavement cell / measure stomatal index, pavement cell shape descriptor:
+        - The inference result will be **polygon** shapes outlining potential stomata and their pores.
+    - If you are focusing on pavement cells, or measuring stomatal index and pavement cell shape descriptors:
         - → Select `stoma and pavement cell segmentation model`
-        - The inference result is **polygon** for the potential stomatal complex and pavement cell
+        - The inference result will be **polygon** shapes outlining potential stomatal complexes and pavement cells.
 </details>
 
 <details>
 <summary style="padding-left: 1.5em;"><strong>03. AI Inference</strong></summary>
 
-- Click `AI😎` button → Run inference to execute automatic detection or segementation
-- Inference results will be directly displayed on the image as shown in following figures
+- Click `AI😎` button → Run inference to execute automatic detection or segmentation
+- Inference results will be directly displayed on the image as shown in the following figures
 
 <p align="center">
 <img src="readme_medias\3_detect_model.gif" alt="3_detect_model" width="32%">
@@ -210,7 +209,7 @@ chmod +x SQ_Mac
 
 1. Set the scale: `Analyze` → `Set Measuring Scale`
 2. Click `Feature Extraction` button
-3. The results will be displayed in the right-side `ResultsSummary` and `MeasuredResults` sub-windows
+3. The results will be displayed on the right-side `ResultsSummary` and `MeasuredResults` sub-windows
 4. You can choose to copy or export the results to a CSV file
 
 <p align="center">
@@ -221,7 +220,7 @@ chmod +x SQ_Mac
 </details>
 
 <details>
-<summary style="padding-left: 1.5em;"><strong>Workflow Summmary</strong></summary>
+<summary style="padding-left: 1.5em;"><strong>Workflow Summary</strong></summary>
 <p align="center">
 <img src="readme_medias\3_workflow.jpg" alt="3_workflow" width="70%">
 </p>
@@ -238,7 +237,7 @@ chmod +x SQ_Mac
 <summary style="padding-left: 1.5em;"><strong>Rapid measurement of stomatal aperture or size</strong></summary>
 
 - If you want to **measure stomatal aperture or size** and quickly edit inference results:
-    1. you can use the `GetMER` button after model inference to obtain the minimum bounding rotated rectangle of the polygons;
+    1. You can use the `GetMER` button after model inference to obtain the minimum bounding rotated rectangle of the polygons;
     2. You can set the polygons to be invisible and only display the rotated rectangles for quick editing;
     3. After editing, click `Feature Extraction` to quickly obtain stomatal aperture and size data.
 
@@ -251,8 +250,8 @@ chmod +x SQ_Mac
 <summary style="padding-left: 1.5em;"><strong>Rapid measurement of stomatal index</strong></summary>
 
 - If you want to quickly **measure the stomatal index** and edit the inference results, you can use `Analyze`→ `Shape Filter` to select the shapes you want to filter out that are located on certain edges after model inference;
-- Then you can use `View`→`All shapes are displayed as points` to replace each shape (represent a cell) with a point;
-- Next confirm and count the cells by adding or deleting points;
+- Then you can use `View`→`All shapes are displayed as points` to replace each shape (each represents a cell) with a point;
+- Next, confirm and count the cells by adding or deleting points;
 - Finally, calculate the stomatal index based on the number of stomata and pavement cells.
 <p align="center">
 <img src="readme_medias\3_rapid_stomatal_index.gif" alt="3_rapid_stomatal_index" width="70%">
@@ -380,9 +379,9 @@ chmod +x SQ_Mac
 <a id="dataset-used-for-training-the-model"></a>
 <summary style="font-size:1.5em;font-weight:bold;">📖 Dataset used for training the model</summary>
 
-- Dataset for the stomata dectection model | [Download]()
-- Dataset for the stoma and pore segemetation model | [Download]()
-- Dataset for the stoma and pavement cell segmentaion model | [Download]()
+- Dataset for the stomata detection model | [Download]()
+- Dataset for the stoma and pore segmentation model | [Download]()
+- Dataset for the stoma and pavement cell segmentation model | [Download]()
 <p align="center">
 <img src="readme_medias\4_dataset.jpg" alt="4_dataset" width="70%">
 </p>
@@ -390,7 +389,7 @@ chmod +x SQ_Mac
 <a id="technical-architecture"></a>
 <summary style="font-size:1.5em;font-weight:bold;">🧩 Software Architecture</summary>
 
-- **UI framwork**: [PyQt5](https://www.riverbankcomputing.com/static/Docs/PyQt5/)
+- **UI framework**: [PyQt5](https://www.riverbankcomputing.com/static/Docs/PyQt5/)
 - **Deep Learning Model Training and  Inference**: [YOLOv11 (Ultralytics)](https://github.com/ultralytics/ultralytics)
 - **Shape and Data Analysis**:
     - [OpenCV](https://github.com/opencv/opencv)
