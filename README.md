@@ -68,8 +68,9 @@
 
 - After downloading, extract the files to a folder. 
     - Using the default decompression tool provided by the Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead. **Important:** Ensure that the file path contains **no special characters or Chinese characters.**
-    - The app folder contains the executable, source code (in the `src` subfolder), and a specific Python interpreter (in the `Python` subfolder).**Do not rename or modify these folders unless you intend to change the application's functionality.**
+    - The app folder contains the executable, source code (in the `src` subfolder), and a specific Python interpreter (in the `Python` subfolder). **Do not rename or modify these folders unless you intend to change the application's functionality.**
     - To run the application without making any modifications, simply execute either `StomataQuant_c.exe` or `StomataQuant_GPU_c.exe`.
+    - Upon running the program, a **terminal** window will open to display program-related information. You can **minimize this window but do not close it**.
 
 <p align="center">
 <img src="readme_medias\2_windows_startup.gif" alt="2_windows_startup" width="70%">
