@@ -1,26 +1,129 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-from PyQt5.QtCore import Qt, QTimer, QEventLoop,QPluginLoader, QCoreApplication, QtMsgType, qInstallMessageHandler
+import ctypes
+import importlib.util  # 引入底层模块查找工具
+
+# 找到当前脚本所在目录 (也就是 app/src 目录)
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+# 找到 app 根目录 (向上一级)
+APP_ROOT = os.path.dirname(SRC_DIR)
+# 封装的 Python 根目录
+PYTHON_ROOT = os.path.join(APP_ROOT, "python")
+# 封装的 site-packages 路径
+LOCAL_SP = os.path.join(PYTHON_ROOT, "Lib", "site-packages")
+
+# ================= 环境嗅探：判断是打包环境还是开发环境 =================
+is_packaged_env = sys.executable.startswith(PYTHON_ROOT) and os.path.exists(PYTHON_ROOT)
+
+if is_packaged_env:
+    print("----------------------------------------------------------------")
+    print("✨ [StomataQuant] 欢迎使用！祝您实验顺利，科研成果喜提顶刊！")
+    print("✨ Welcome to StomataQuant! Wishing you smooth experiments and high-impact publications!")
+    print(f"📧 合作与建议 (Collab/Ideas): milo.liu@stu.pku.edu.cn | GitHub: https://github.com/Milo-L/StomataQuant")
+    print("----------------------------------------------------------------")
+    os.environ["PYTHONHOME"] = PYTHON_ROOT
+
+    clean_sys_path = [SRC_DIR]
+    LIB_DIR = os.path.join(PYTHON_ROOT, "Lib")
+    clean_sys_path.append(LIB_DIR) 
+
+    for p in sys.path:
+        if p.lower().startswith(PYTHON_ROOT.lower()) or p.endswith('.zip'):
+            if p not in clean_sys_path:  
+                clean_sys_path.append(p)
+
+    sys.path = clean_sys_path
+
+    if LOCAL_SP not in sys.path:
+        sys.path.insert(1, LOCAL_SP) 
+
+    LOCAL_SCRIPTS = os.path.join(PYTHON_ROOT, "Scripts")
+    os.environ["PATH"] = f"{PYTHON_ROOT}{os.pathsep}{LOCAL_SCRIPTS}{os.pathsep}{LOCAL_SP}{os.pathsep}" + os.environ.get("PATH", "")
+else:
+    print("🛠️ [StomataQuant] 检测到开发环境：欢迎大佬改造，愿 Bug 随风去，灵感永不断！")
+    print("🛠️ Dev Mode: Welcome to modify! May your code be bug-free and inspiration never-ending.")
+    print(f"🤝 合作与建议 (Collab/Ideas): milo.liu@stu.pku.edu.cn | https://github.com/Milo-L/StomataQuant")
+    print(f"🚀 Running on: {sys.executable}")
+    print("----------------------------------------------------------------")
+    if SRC_DIR not in sys.path:
+        sys.path.insert(0, SRC_DIR)
+
+# ================= PyQt5 插件及底层依赖配置 (终极自适应版) =================
+def get_safe_windows_path(path):
+    if not sys.platform.startswith("win"):
+        return path
+    try:
+        buf_size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
+        if buf_size > 0:
+            buf = ctypes.create_unicode_buffer(buf_size)
+            ctypes.windll.kernel32.GetShortPathNameW(path, buf, buf_size)
+            return buf.value
+    except Exception as e:
+        print(f"短路径转换失败，回退原路径: {e}")
+    return path
+
+# 清理旧环境变量
+if 'QT_PLUGIN_PATH' in os.environ:
+    del os.environ['QT_PLUGIN_PATH']
+if 'QT_QPA_PLATFORM_PLUGIN_PATH' in os.environ:
+    del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
+
+# 【核心修复】：智能探测是 Qt5 还是 Qt 文件夹！
+
+pyqt5_spec = importlib.util.find_spec('PyQt5')
+raw_plugin_path = ""
+
+if pyqt5_spec and pyqt5_spec.submodule_search_locations:
+    pyqt5_dir = pyqt5_spec.submodule_search_locations[0]
+    
+    # 路径 A: 标准 Pip 安装路径 (新版)
+    p_pip_new = os.path.join(pyqt5_dir, 'Qt5', 'plugins')
+    # 路径 B: 标准 Pip 安装路径 (旧版)
+    p_pip_old = os.path.join(pyqt5_dir, 'Qt', 'plugins')
+    # 路径 C: 你现在的 Anaconda 环境路径 (关键！)
+    # 它在 site-packages 的上两级目录下的 Library/plugins
+    p_conda = os.path.abspath(os.path.join(pyqt5_dir, "..", "..", "..", "Library", "plugins"))
+
+    if os.path.exists(p_pip_new):
+        raw_plugin_path = p_pip_new
+    elif os.path.exists(p_pip_old):
+        raw_plugin_path = p_pip_old
+    elif os.path.exists(p_conda):
+        raw_plugin_path = p_conda
+
+# 如果上面都没搜到（比如打包环境），再使用兜底路径
+if not raw_plugin_path:
+    raw_plugin_path = os.path.join(LOCAL_SP, "PyQt5", "Qt5", "plugins")
+
+
+# 获取短路径别名
+safe_plugin_path = get_safe_windows_path(raw_plugin_path)
+safe_platforms_path = os.path.join(safe_plugin_path, 'platforms')
+
+# 关键防错拦截：确保探测到的路径确实存在，再交给环境变量
+if os.path.exists(safe_plugin_path):
+    os.environ['QT_PLUGIN_PATH'] = safe_plugin_path
+    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = safe_platforms_path
+    print(f"============================== 成功挂载 QT_PLUGIN_PATH: {os.environ['QT_PLUGIN_PATH']}")
+else:
+    print(f"【严重警告】：插件路径不存在！{safe_plugin_path}")
+
+# ================= 现在才可以安全导入 PyQt5 =================
+from PyQt5.QtCore import Qt, QTimer, QEventLoop, QPluginLoader, QCoreApplication, QtMsgType, qInstallMessageHandler
 from PyQt5.QtGui import QImageReader
 import PyQt5
-# 设置插件路径 Set the plug-in path
-if 'QT_PLUGIN_PATH' in os.environ:
-    print(os.environ['QT_PLUGIN_PATH'])
-    del os.environ['QT_PLUGIN_PATH']
 
-os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(os.path.dirname(sys.executable), "Library", "plugins", "platforms")
-plugin_path = os.path.join(os.path.dirname(PyQt5.__file__), 'Qt', 'plugins')
-os.environ['QT_PLUGIN_PATH'] = plugin_path
-print('==============================', os.environ['QT_PLUGIN_PATH'])
+# 强行将正确的安全路径写入 PyQt5 核心
+if os.path.exists(safe_plugin_path):
+    QCoreApplication.addLibraryPath(safe_plugin_path)
 
-# 添加库路径 Add library path
-QCoreApplication.addLibraryPath(plugin_path)
 print("The loaded library path：", QCoreApplication.libraryPaths())
 
-# 检查支持的图像格式 Check supported image formats
+# 检查支持的图像格式
 formats = QImageReader.supportedImageFormats()
-print(formats)
+print("Supported Formats:", formats)
+# ===============================================================================
 
 # 导入核心包 Import core packages
 import gc
@@ -44,7 +147,7 @@ from shape import *
 from canvas import Canvas, USE_NUMBA, check_numba,process_polygon_data
 from dock_widgets import ShapeListDock, LabelListDock,MeasuredResultsDock,ImageResultsSummaryDock
 from InferenceThread import YOLOSegInferenceThread,PolygonProcessThread,ABorADInferenceThread, HeatMapGenerationThread
-from BatchProcessor import BatchProcessor, BatchExporter, BatchImporter
+from BatchProcessor import BatchProcessor, BatchExporter, BatchImporter, BatchFeatureExporter
 import resources_rc
 #############################################################################################################
 # UIMainWindow
@@ -194,10 +297,24 @@ class UIMainWindow(MainWindow):
         self.actionBatchImportPolygon.triggered.connect(self.batch_import_polygon)
         self.actionBatchImportRectangle.triggered.connect(self.batch_import_rectangle)
         self.actionBatchImportRotatedRectangle.triggered.connect(self.batch_import_rotated_rectangle)
+        
+        self.actionExportPolygonFeature.triggered.connect(lambda: self.batch_export_features('polygon'))
+        self.actionExportRotatedRectangleFeature.triggered.connect(lambda: self.batch_export_features('rotated_rectangle'))
+        self.actionExportRectangleFeature.triggered.connect(lambda: self.batch_export_features('rectangle'))
+        self.actionExportPointFeature.triggered.connect(lambda: self.batch_export_features('point'))
 
                 # 在__init__方法的末尾添加
         self.actionShortcutHelp.triggered.connect(self.show_shortcut_help)
         self.actionSeeHelp.triggered.connect(self.show_help)
+    
+    def batch_export_features(self, shape_type):
+        """
+        批量导出指定形状类型的特征
+        Args:
+            shape_type: 'polygon', 'rotated_rectangle', 'rectangle', 'point'
+        """
+        exporter = BatchFeatureExporter(self)
+        exporter.export_features(shape_type)
 
     def show_help(self):
         """使用系统默认浏览器打开 StomataQuant 的 GitHub 页面"""
@@ -797,6 +914,37 @@ class UIMainWindow(MainWindow):
 
     # 更新dock窗口中的操作状 Update the operation status in the dock window
 
+    # def update_actions_inDocks(self):
+    #     """更加安全地更新dock窗口中的操作状态"""
+    #     try:
+    #         # 更新ShapeListDock
+    #         if hasattr(self, 'shapedockinstance'):
+    #             self.shapedockinstance.table_widget.viewport().update()
+
+    #         # 更新LabelListDock
+    #         if hasattr(self, 'labeldockinstance'):
+    #             self.labeldockinstance.table_widget.viewport().update()
+
+    #         # 获取当前画布前进行检查
+    #         current_graphics_view = self.get_current_graphics_view()
+    #         if not current_graphics_view:
+    #             return
+                
+    #         # 检查画布是否存在    
+    #         current_canvas = current_graphics_view.canvas
+    #         if not current_canvas:
+    #             return
+                
+    #         # 更新工具栏状态
+    #         self.update_actions_inToolBar()
+
+    #         # 发送shapes changed信号
+    #         current_canvas.shapesChanged.emit()
+            
+    #     except Exception as e:
+    #         print(f"Error in update_actions_inDocks: {e}")
+# 更新dock窗口中的操作状 Update the operation status in the dock window
+
     def update_actions_inDocks(self):
         """更加安全地更新dock窗口中的操作状态"""
         try:
@@ -821,8 +969,13 @@ class UIMainWindow(MainWindow):
             # 更新工具栏状态
             self.update_actions_inToolBar()
 
-            # 发送shapes changed信号
-            current_canvas.shapesChanged.emit()
+            # [核心优化点：切断信号雪崩]
+            # 之前这里发射了 shapesChanged 信号，导致每次新建点都会触发 populate 全量清空并重建几百行表格！
+            # 现在注释掉，因为 on_shape_created 里已经调用了增量添加单行的 add_shape()
+            # current_canvas.shapesChanged.emit() 
+            
+            # [DEBUG 验证打印]
+            print("[DEBUG - 优化验证] update_actions_inDocks 已执行。成功拦截了全量刷新雪崩！")
             
         except Exception as e:
             print(f"Error in update_actions_inDocks: {e}")
@@ -1290,47 +1443,85 @@ class UIMainWindow(MainWindow):
 
         # 为形状设置标签
         shape.label = label
-
+# --- 核心性能修复：移除阻塞UI线程的print，优化分配逻辑 ---
         existing_shapes = [s for s in self.get_current_shapes() if s != shape]
-        existing_same_label_shapes = []
-        existing_same_type_shapes = []
+        
+        match_classnum = None
+        max_group_id = -1
+        has_same_type = False
+        max_classnum = -1
 
         for s in existing_shapes:
+            # 记录当前最大的 classnum
+            if s.classnum is not None and s.classnum > max_classnum:
+                max_classnum = s.classnum
+                
             if s.label == label:
-                existing_same_label_shapes.append(s)
-                print(f"existing_same_label_shapes: {existing_same_label_shapes}")
-                print(f"existing_same_type_shapes: {bool(existing_same_label_shapes)}")
-            if s.label == label and s.shape_type == shape.shape_type:
-                existing_same_type_shapes.append(s)
-                print(f"existing_same_type_shapes: {existing_same_type_shapes}")
-                print(f"existing_same_type_shapes: {bool(existing_same_type_shapes)}")
+                if match_classnum is None:
+                    match_classnum = s.classnum  # 找到第一个同标签的classnum就记录下来
+                
+                if s.shape_type == shape.shape_type:
+                    has_same_type = True
+                    if s.group_id is not None and s.group_id > max_group_id:
+                        max_group_id = s.group_id
 
-        if existing_same_label_shapes:
+        if match_classnum is not None:
             # 如果标签已存在，使用相同的属性
-            shape.classnum = existing_same_label_shapes[0].classnum
-
-            if existing_same_type_shapes:
-                max_group_id = max(s.group_id for s in existing_same_type_shapes)
+            shape.classnum = match_classnum
+            if has_same_type:
                 shape.group_id = max_group_id + 1
             else:
                 # 如果不存在相同 shape_type 的形状，group_id 从 0 开始重新编号
                 shape.group_id = 0
         else:
             # 如果是新标签，分配新的 classnum 和 group_id
-            # 获取当前最大的 classnum
-            max_classnum = -1
-            for s in existing_shapes:
-                if s.classnum is not None and s.classnum > max_classnum:
-                    max_classnum = s.classnum
-                else:
-                    max_classnum = -1
             shape.classnum = max_classnum + 1
             shape.group_id = 0
 
-        # 更新 UI
+        # 更新 UI (这里调用的是单行追加，速度极快)
         self.labeldockinstance.add_label(shape.label)
         self.shapedockinstance.add_shape(shape)
         self.update_actions_inDocks()
+        # existing_shapes = [s for s in self.get_current_shapes() if s != shape]
+        # existing_same_label_shapes = []
+        # existing_same_type_shapes = []
+
+        # for s in existing_shapes:
+        #     if s.label == label:
+        #         existing_same_label_shapes.append(s)
+        #         # print(f"existing_same_label_shapes: {existing_same_label_shapes}")
+        #         print(f"existing_same_type_shapes: {bool(existing_same_label_shapes)}")
+        #     if s.label == label and s.shape_type == shape.shape_type:
+        #         existing_same_type_shapes.append(s)
+        #         # print(f"existing_same_type_shapes: {existing_same_type_shapes}")
+        #         print(f"existing_same_type_shapes: {bool(existing_same_type_shapes)}")
+
+        # if existing_same_label_shapes:
+        #     # 如果标签已存在，使用相同的属性
+        #     shape.classnum = existing_same_label_shapes[0].classnum
+
+        #     if existing_same_type_shapes:
+        #         max_group_id = max(s.group_id for s in existing_same_type_shapes)
+        #         shape.group_id = max_group_id + 1
+        #     else:
+        #         # 如果不存在相同 shape_type 的形状，group_id 从 0 开始重新编号
+        #         shape.group_id = 0
+        # else:
+        #     # 如果是新标签，分配新的 classnum 和 group_id
+        #     # 获取当前最大的 classnum
+        #     max_classnum = -1
+        #     for s in existing_shapes:
+        #         if s.classnum is not None and s.classnum > max_classnum:
+        #             max_classnum = s.classnum
+        #         else:
+        #             max_classnum = -1
+        #     shape.classnum = max_classnum + 1
+        #     shape.group_id = 0
+
+        # # 更新 UI
+        # self.labeldockinstance.add_label(shape.label)
+        # self.shapedockinstance.add_shape(shape)
+        # self.update_actions_inDocks()
 
     #################################################################
     # ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑

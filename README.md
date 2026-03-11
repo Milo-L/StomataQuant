@@ -1,7 +1,11 @@
+
 <!-- markdownlint-disable -->
 <p align="center">
 <img src="readme_medias\0_title.jpg" alt="0_title" width="100%">
 </p>
+
+
+[![Paper](https://img.shields.io/badge/Method%20Paper-Journal%20of%20Plant%20Ecology-green)](#citation)
 
 <summary style="font-size:1.5em;font-weight:bold;"> 📑 Table of contents</summary>
 
@@ -16,6 +20,7 @@
 - [📖 Dataset used for training the model](#dataset-used-for-training-the-model)
 - [🧩 Software Architecture](#technical-architecture)
     - [🗃️ Code file structure](#code-file-structure)
+- [📑 Citation](#citation)
 - [📜 License](#license)
 - [🤝 Contact Us](#contact-us)
 ---
@@ -37,43 +42,71 @@
 <a id="getting-started"></a>
 <summary style="font-size:1.5em;font-weight:bold;">🏃‍♀️‍➡️ Getting Started</summary>
 
-- **This program can be downloaded in two ways:**
-   1. Download the [packaged application](#using-the-packaged-application) (**recommended for users without programming experience**); 
-   2. Or download the [source code](#using-the-source-code) from GitHub.
+1. **This program can be downloaded in two ways:**  
+    1. Download the [packaged application](#using-the-packaged-application) (**recommended for users without programming experience**);  
+    2. Or download the [source code](#using-the-source-code) from GitHub (**recommended if you plan to use GPU acceleration**).
+
+2. **Model Weights Download**
+    > This tool is powered by a **YOLO-based model**. Therefore, in addition to the software itself, you also need to download the **corresponding model weights** for your specific task in order to run AI inference. The basic usage workflow can be found [here](#basic-operation-flow).
+    > You can choose different types of models according to your task and select different model sizes based on the performance of your computer: **n** (nano), **s** (small), **m** (medium), **l** (large), and **xl** (extra large).
+
+    - We recommend using the **xl** model to achieve better inference performance. However, when running on **CPU only**, larger models may result in longer inference times.
+
+        + **All Models** | [Download](https://disk.pku.edu.cn/link/AAC44553ECE969443AA3FB5471613AE9EC) | Extract Code: `0Qr2`  
+
+            + **Stomata Detection** | [Download]( https://disk.pku.edu.cn/link/AA2BA08969302A4DF18131895C5FDC2F3A) | Extract Code: `N2D2`  
+            + **Stomata and Pores Segmentation** | [Download](https://disk.pku.edu.cn/link/AA7C4E6A7F2FD84189A80655F6E6D1F25D) | Extract Code: `J63U`  
+            + **Stomata and Pavement Cells Segmentation** | [Download](https://disk.pku.edu.cn/link/AA4F0255457A324A50834D4024CB124688) | Extract Code: `3v3S`
+
 
 <a id="using-the-packaged-application"></a>
 <details>
 <summary style="padding-left: 1em;"><strong>💻 Using the Packaged Application</strong></summary>
 
 1. **Application Download**
-    - **Windows**
-        + CPU only Application (**Recommended, Most Stable**) | [Download](https://disk.pku.edu.cn/link/AA76003FFFD0504A64AA7AD59352886DE4)| Extract Code: `WoRM`
-        + GPU Application (CUDA Version > 12.4) | [Download](https://disk.pku.edu.cn/link/AAD31BEA8CE1EE4C13991BE5F1C20C38F2) | Extract Code: `36Q2`
-    - **macOS**
-        + CPU only Application | [Download](https://disk.pku.edu.cn/link/AA02FD45ED0CEB4845986A61DEE9D7592C) | Extract Code: `Axi5`
+   - **Windows**
+     + Windows Installer (CPU Version) (**Recommended, Most Stable**) | [Download](https://disk.pku.edu.cn/link/AA58997F2ED5BC47FD84725FD99C340CDA) | Extract Code: `JgEB`
 
-2. **Model Weights Download**
-    + You can choose different types of models according to your task, and select different-sized models based on the performance of your computer, from **n**(nano), **s**(small), m(medium), **l**(large), **xl**(extra large).
-    - We recommend using the **xl**-sized model to achieve better inference results. However, the drawback is that without GPU acceleration, the inference time will be longer.
-    + **All Models** | [Download](https://disk.pku.edu.cn/link/AA67C4E18F5DCC4D47ACECB4638BECD038) 
-        + **Stomata Detection** | [Download](https://disk.pku.edu.cn/link/AABDB2D8A64C1047BC97E823E3551DCF8E) 
-        + **Stoma and Pore Segmentation** | [Download](https://disk.pku.edu.cn/link/AA420808C46B864347AD09C42E1133AA0F) 
-        + **Stoma and Pavement Cell Segmentation** | [Download](https://disk.pku.edu.cn/link/AADF39B88851B54E06AD9653CDC3028A6D) 
+    - Note:
+       > Currently, the packaged installer is only available for the CPU version. GPU acceleration depends on compatible **CUDA, PyTorch, and NVIDIA driver versions**, which can vary across different Windows systems. If you would like to use GPU acceleration for faster inference, we recommend downloading the **[source code](#using-the-source-code)** and configuring the environment according to your local CUDA setup.
 
-3. **Before Running the Packaged Application (Preliminary Steps)**
+   - **macOS: CPU-only Version**
+        + CPU-only Application  | [Download](https://disk.pku.edu.cn/link/AA9585CFC7A02B4A3EA0AC6D458530D7C1) | Extract Code: `UXqY`
+        
+        > Note: The macOS version is provided as a standalone Unix executable. Because it is not from the App Store, macOS will require manual permission to run.
 
 
+2. **Before Running the Packaged Application (Preliminary Steps)**
 <details>
 <summary style="padding-left: 3em;"><strong>&nbsp;&nbsp;&nbsp;&nbsp; Windows:</strong></summary>
 
-- After downloading, extract the files to a folder. 
-    - Using the default decompression tool provided by the Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead. **Important:** Ensure that the file path contains **no special characters or Chinese characters.**
-    - The app folder contains the executable, source code (in the `src` subfolder), and a specific Python interpreter (in the `Python` subfolder). **Do not rename or modify these folders unless you intend to change the application's functionality.**
-    - To run the application without making any modifications, simply execute either `StomataQuant_c.exe` or `StomataQuant_GPU_c.exe`.
-    - Upon running the program, a **terminal** window will open to display program-related information. You can **minimize this window but do not close it**.
+- **Step 1: Run the Installer & Choose Path**
+  - Double-click the downloaded `StomataQuant-1.0-Windows-CPU-Setup.exe` installer. You can choose your preferred installation path. 
+  - Click "Next"...... "Next" and then "Install".
 
 <p align="center">
-<img src="readme_medias\2_windows_startup.gif" alt="2_windows_startup" width="70%">
+<img src="readme_medias\choose_your_work_path.png" alt="choose_your_work_path" width="48%">
+
+<img src="readme_medias\next_and_next..._and_click install.png" alt="click_install" width="48%">
+</p>
+
+
+- **Step 2: Wait for Installation to Complete**
+  - Please be patient while the installer extracts the deep learning environment and core files. Once the progress bar is full, the installation is successful.
+
+<p align="center">
+<img src="readme_medias\and waiting for_its ok.png" alt="waiting_for_install" width="48%">
+<img src="readme_medias\when_its_ok.png" alt="install_success" width="48%">
+</p>
+
+- **Step 3: Launch and Use**
+  - Launch **StomataQuant** directly by double-clicking the shortcut generated on your Desktop.
+  - ⚠️ **Important:** A black command-line (terminal) window will pop up. **Please DO NOT close it!** This is a normal background process used for outputting debugging logs. You can simply minimize it.
+  - The initial startup might take a few moments as it initializes the environment. Please be patient. Once the GUI appears, you are ready to go!
+
+<p align="center">
+<img src="readme_medias\dontworry_youll_find_blackcommandline_isfordebug_and_dontclose.png" alt="black_commandline" width="48%">
+<img src="readme_medias\the_first_open_is_slow_but_be_paint_and_youcanuse_it.png" alt="first_open_gui" width="48%">
 </p>
 
 </details>
@@ -83,12 +116,12 @@
 <summary style="padding-left: 3em;"><strong> &nbsp;&nbsp;&nbsp;&nbsp; macOS:</strong></summary>
 
 
-- **After downloading, you need to make the application executable**
-1. Open the terminal. Navigate to the directory where you downloaded the file. Run the following command to make SQ_Mac executable:
-```bash
-chmod +x SQ_Mac
-```
-- This command grants **execute permissions** to the SQ_Mac file.
+- **After downloading and extracting the file, you must tell macOS that this file is an application.**
+1. Open the Terminal app. Type cd followed by a space, then drag the folder containing `SQ_Mac` into the terminal window and press Enter. Run the following command to make `SQ_Mac` executable:
+    ```bash
+    chmod +x SQ_Mac
+    ```
+- This command grants **execute permissions** to the `SQ_Mac` file.
 
 2. Run the program. You might need to allow the program to run in your system's  Security & Privacy settings if it was downloaded from an external source. This is a standard macOS security measure.
 
@@ -98,7 +131,9 @@ chmod +x SQ_Mac
 </p>
 
 
-3. Upon running the program, a **terminal** window will open to display program-related information. You can **minimize this window but do not close it**. Wait for the program to launch. Note that startup on macOS might take longer due to system checks and package loading."
+3. Double-click `SQ_Mac` to start.
+    - ⚠️ **Important:** A Terminal window will open to initialize the environment. Do not close this window, or the program will exit. You can simply minimize it.
+    - Be Patient: The first startup on macOS can take 1-2 minutes due to Apple's background security verification and package loading. Once the GUI appears, the app is ready for use.
 
 
 <p align="center">
@@ -114,6 +149,9 @@ chmod +x SQ_Mac
 <details>
 <summary style="padding-left: 1em;"><strong>🧑‍💻 Using the Source Code </strong></summary>
 
+- If you choose to run StomataQuant from source, you are probably a power user or developer 😎. 
+    > Welcome to explore, **debug, improve, and contribute** to the project!   If you encounter issues or have suggestions, feel free to reach out in the [contact us](#contact-us) section.
+
 1. **Clone the repository**
     ```
     git clone https://github.com/Milo-L/StomataQuant.git
@@ -126,7 +164,7 @@ chmod +x SQ_Mac
     ```
     pip install -r SQ_cpu_requirements.txt
     ```
-3. **Run the application using your Python interpreter, and don't forget to download the necessary [model files](#using-the-packaged-application)**
+3. **Run the application using your Python interpreter, and don't forget to download the necessary [model files](#getting-started)**
     ```
     python Load_StomataQuant_GUI.py
     ```
@@ -150,7 +188,7 @@ chmod +x SQ_Mac
 5. **Batch Processing Capability:** 
     - Allows for automated execution of model inference and analysis tasks on multiple loaded images.
 6. **Heatmap Generation:** 
-    - Generates feature distribution heatmaps for intuitive visualization of analysis results (as depicted in following figure ).
+    - Generates feature distribution heatmaps for intuitive visualization of analysis results (as depicted in the following figure).
 
 <p align="center">
 <img src="readme_medias\3_heatmap_generated_by_StomataQuant.jpg" alt="3_heatmap_generated_by_StomataQuant" width="70%">
@@ -276,7 +314,7 @@ chmod +x SQ_Mac
 
 - Open multiple image tabs;
 - Click `More` → `Batch Processing`;
-- Select the operation you want to be performed (**AI inference, feature extraction, etc.**), as illustrated on the left;
+- Select theoperation you want to perform (**AI inference, feature extraction, etc.**), as illustrated on the left;
 - And initiate batch processing. The example on the right showcases the rapid determination of stomatal aperture **in batches**.
 <p align="center">
 <img src="readme_medias\3_BatchProcess.jpg" alt="3_BatchProcess" width="49%">
@@ -380,9 +418,8 @@ chmod +x SQ_Mac
 <a id="dataset-used-for-training-the-model"></a>
 <summary style="font-size:1.5em;font-weight:bold;">📖 Dataset used for training the model</summary>
 
-- Dataset for the stomata detection model | [Download]()
-- Dataset for the stoma and pore segmentation model | [Download]()
-- Dataset for the stoma and pavement cell segmentation model | [Download]()
+All datasets used for training and validating the **StomataQuant** models are hosted on **Zenodo**. The full dataset repository will be publicly available soon:  : [https://zenodo.org/records/18934358](https://zenodo.org/records/18934358)
+
 <p align="center">
 <img src="readme_medias\4_dataset.jpg" alt="4_dataset" width="70%">
 </p>
@@ -391,13 +428,13 @@ chmod +x SQ_Mac
 <summary style="font-size:1.5em;font-weight:bold;">🧩 Software Architecture</summary>
 
 - **UI framework**: [PyQt5](https://www.riverbankcomputing.com/static/Docs/PyQt5/)
-- **Deep Learning Model Training and  Inference**: [YOLOv11 (Ultralytics)](https://github.com/ultralytics/ultralytics)
+- **Deep Learning Model Training and Inference**: [YOLOv11 (Ultralytics)](https://github.com/ultralytics/ultralytics)
 - **Shape and Data Analysis**:
     - [OpenCV](https://github.com/opencv/opencv)
     - [PIL (Pillow)](https://github.com/python-pillow/Pillow)
     - [NumPy](https://github.com/numpy/numpy)
-    - [shapely](https://github.com/shapely/shapely)
-- **Program Acceleration**: [numba](https://github.com/numba/numba)
+    - [Shapely](https://github.com/shapely/shapely)
+- **Program Acceleration**: [Numba](https://github.com/numba/numba)
 - **Heatmap Visualization**: [Matplotlib](https://github.com/matplotlib/matplotlib)
 <a id="code-file-structure"></a>
 <details>
@@ -448,6 +485,28 @@ chmod +x SQ_Mac
 </details>
 
 
+
+<a id="citation"></a>
+<summary style="font-size:1.5em;font-weight:bold;">📑 Citation</summary>
+
+If you use **StomataQuant** in your research, please cite the following paper:
+
+> Liu, M., Ren, Z., Wei, J., Zhang, H., Li, Y., Wang, G., Xie, P., & Wang, Y.  
+**Integrating automated detection and segmentation for quantitative analysis of stomata and pavement cells using StomataQuant.**  *Journal of Plant Ecology.* (Accepted)
+<details>
+<summary style="padding-left: 1em; cursor: pointer;"><strong>Click to view BibTeX</strong></summary>
+
+```bibtex
+@article{StomataQuant,
+  title = {Integrating Automated Detection and Segmentation for Quantitative Analysis of Stomata and Pavement Cells using StomataQuant},
+  author = {Liu, Meng-Long and Ren, Zi-Rong and Wei, Jian and Zhang, He and Li, Yu-Kang and Wang, Gu-Yan and Xie, Peng and Wang, Yin},
+  journal = {Journal of Plant Ecology},
+  year = {2026},
+  note = {Accepted}
+}
+```
+</details>
+
 <a id="license"></a>
 <summary style="font-size:1.5em;font-weight:bold;">📜 License</summary>
 
@@ -460,7 +519,41 @@ chmod +x SQ_Mac
 <a id="contact-us"></a>
 <summary style="font-size:1.5em;font-weight:bold;">🤝 Contact Us</summary>
 
-- For any questions or suggestions, please submit an [issue](https://github.com/Milo-L/StomataQuant/issues) or contact [Menglong Liu](https://github.com/Milo-L/) ([milo.liu@stu.pku.edu.cn](mailto:milo.liu@stu.pku.edu.cn))  or [Dr. Yin Wang](https://www.researchgate.net/profile/Yin-Wang-78) ([wangyinpku@pku.edu.cn](mailto:wangyinpku@pku.edu.cn)).
+- 🌱 Contributions Welcome!
+- **StomataQuant** is an independent open-source project developed during academic research.  
+    If you are interested in **Plant Phenotyping**, **Computer Vision (YOLO)**, or **PyQt5 GUI development**, contributions of all kinds are warmly welcome.
+
+    - Whether it is **improving performance**, **fixing bugs**, **adding new features**, or **training models for additional plant species**, every contribution is greatly appreciated. Pull requests, suggestions, and discussions are all welcome.
+
+    - Areas where contributions would be especially helpful
+        > - **Performance**
+        >     - Improve rendering speed when displaying images containing thousands of polygons.
+        >     - The current implementation already uses **Numba**, but there is still room for further optimization.
+        >
+        > - **New AI Models**
+        >     - Train and integrate models for additional plant species or different imaging modalities.
+        >
+        > - **Features**
+        >     - Suggestions or implementations of additional features that could improve usability and overall user experience are very welcome.
+        >
+        > - **Localization (i18n)**
+        >     - Help translate the GUI into additional languages.
+
+
+    - If you find this project useful or have ideas for improvement, please feel free to **open an issue** or **submit a pull request**.    Any contribution is sincerely appreciated.
+
+
+- Contact:
+
+    - For questions, bug reports, or collaboration inquiries, please contact:
+        -  **Menglong Liu**  
+            GitHub: https://github.com/Milo-L/  
+            Email: milo.liu@stu.pku.edu.cn  
+
+        - **Dr. Yin Wang**  
+            Profile: http://scholar.pku.edu.cn/wangyin  
+            Email: wangyinpku@pku.edu.cn
+
 
 ---
 <p align="center">

@@ -1299,7 +1299,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         self.create_shape_type = 'polygon'
         self.current_shape = Shape(shape_type='polygon',scale_factor=self.scale_factor)
         self.drawing = False
-        self.save_state()
+        # self.save_state()
 
     def create_rotated_rectangle(self):
         """创建旋转矩形模式"""
@@ -1307,7 +1307,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         self.create_shape_type = 'rotated_rectangle'
         self.current_shape = Shape(shape_type='rotated_rectangle',scale_factor=self.scale_factor)
         self.drawing = False
-        self.save_state()
+        # self.save_state()
 
     def create_rectangle(self):
         """创建矩形模式"""
@@ -1315,7 +1315,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         self.create_shape_type = 'rectangle' 
         self.current_shape = Shape(shape_type='rectangle',scale_factor=self.scale_factor)
         self.drawing = False
-        self.save_state()
+        # self.save_state()
 
     def create_line(self):
         """创建线条模式"""
@@ -1323,7 +1323,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         self.create_shape_type = 'line'
         self.current_shape = Shape(shape_type='line',scale_factor=self.scale_factor)
         self.drawing = False
-        self.save_state()
+        # self.save_state()
 
     def create_point(self):
         """创建点模式"""
@@ -1331,163 +1331,306 @@ class Canvas(QtWidgets.QGraphicsObject):
         self.create_shape_type = 'point'
         self.current_shape = Shape(shape_type='point',scale_factor=self.scale_factor)
         self.drawing = False
-        self.save_state()
+        # self.save_state()
 
     def finish_shape(self):
         """完成形状创建"""
         if self.current_shape:
+            self.save_state()
             self.shapes.append(self.current_shape)
             self.shapeCreated.emit(self.current_shape)
-            self.save_state()
+            # self.save_state()
             self.current_shape = None
             self.drawing = False
             self.create_shape_type = self.create_shape_type
-            self.shapesChanged.emit()
+            # self.shapesChanged.emit()
             self.update()
 
 ###############################################
 ############ 撤销回退机制的实现
 ############ the revocation/undo mechanism
 ###############################################
+    # def save_state(self):
+    #     """保存当前形状状态以支持撤销操作，手动创建新的形状对象而不是使用deepcopy"""
+    #     try:
+    #         # 创建形状的简化表示，只包含可安全序列化的数据
+    #         shapes_state = []
+    #         for shape in self.shapes:
+    #             try:
+    #                 # 安全地收集有效点
+    #                 valid_points = []
+    #                 for p in shape.pointslist:
+    #                     if p is not None and isinstance(p, QPointF):
+    #                         try:
+    #                             valid_points.append(QPointF(p.x(), p.y()))
+    #                         except Exception as e:
+    #                             print(f"无法复制点: {e}")
+    #                             continue
+
+    #                 # 检查形状是否有效
+    #                 if not valid_points:
+    #                     print(f"跳过无效形状: 没有有效的点")
+    #                     continue
+
+    #                 # 确保多边形至少有3个点，或者其他形状符合要求
+    #                 if (shape.shape_type == 'polygon' and len(valid_points) < 3) or \
+    #                         (shape.shape_type == 'rectangle' and len(valid_points) != 2) or \
+    #                         (shape.shape_type == 'line' and len(valid_points) != 2) or \
+    #                         (shape.shape_type == 'rotated_rectangle' and len(valid_points) != 4) or \
+    #                         (shape.shape_type == 'point' and len(valid_points) != 1):
+    #                     print(f"跳过无效形状: {shape.shape_type} 点数量不正确")
+    #                     continue
+
+    #                 # 为每个形状创建一个新实例
+    #                 new_shape = Shape(
+    #                     label=shape.label,
+    #                     classnum=shape.classnum,
+    #                     pointslist=valid_points,
+    #                     shape_type=shape.shape_type,
+    #                     group_id=shape.group_id
+
+    #                 )
+    #                 # 复制必要的其他属性
+    #                 new_shape.visible = shape.visible
+    #                 new_shape._selected = shape._selected
+    #                 new_shape.rotated_angle = shape.rotated_angle
+    #                 new_shape._show_group_id = shape._show_group_id
+    #                 new_shape.feature_results = shape.feature_results
+    #                 new_shape.scale_factor = shape.scale_factor
+
+    #                 # 添加到状态列表
+    #                 shapes_state.append(new_shape)
+    #             except Exception as e:
+    #                 print(f"处理形状时出错: {e}")
+    #                 continue  # 跳过这个形状
+
+    #         # 存储状态
+    #         self.undo_stack.append(shapes_state)
+
+    #         # 限制撤销栈大小
+    #         if len(self.undo_stack) > 4:
+    #             self.undo_stack.pop(0)
+
+    #     except Exception as e:
+    #         print(f"保存状态时出错: {e}")
+    #         # 错误处理 - 可能需要清空撤销栈以避免进一步问题
+    #         self.undo_stack = []
+
+    # def undo(self):
+    #     """安全地恢复到上一个保存的状态"""
+    #     if not self.undo_stack:
+    #         return
+
+    #     try:
+    #         # 恢复上一个状态
+    #         previous_shapes = self.undo_stack.pop()
+    #         scene = self.scene()
+
+    #         if not scene:
+    #             print("警告：当前画布没有关联场景")
+    #             return
+
+    #         # 清除当前状态
+    #         self.selected_shape = []
+    #         self.hovered_shape = None
+
+            
+    #         # 清除场景中的所有形状
+    #         for shape in self.shapes.copy():
+    #             try:
+    #                 if shape.scene() == scene:
+    #                     scene.removeItem(shape)
+    #                 self.shapes.remove(shape)
+    #             except Exception as e:
+    #                 print(f"从场景移除形状时出错: {e}")
+            
+    #         # 确保形状列表为空
+    #         self.shapes.clear()
+            
+    #         # 为每个保存的形状创建新的形状对象
+    #         for saved_shape in previous_shapes:
+    #             try:
+    #                 # 创建新的形状对象，保持原有属性
+    #                 new_shape = Shape(
+    #                     label=saved_shape.label,
+    #                     classnum=saved_shape.classnum,
+    #                     pointslist=[QPointF(p.x(), p.y()) for p in saved_shape.pointslist],
+    #                     shape_type=saved_shape.shape_type,
+    #                     group_id=saved_shape.group_id
+    #                 )
+                    
+    #                 # 复制其他属性
+    #                 new_shape.visible = saved_shape.visible
+    #                 new_shape._selected = saved_shape._selected
+    #                 new_shape.rotated_angle = saved_shape.rotated_angle
+    #                 new_shape._show_group_id = saved_shape._show_group_id
+    #                 new_shape.feature_results = saved_shape.feature_results
+                    
+    #                 # 只添加到列表和场景，不设置父项
+    #                 self.shapes.append(new_shape)
+    #                 # scene.addItem(new_shape)
+    #                 # 移除这一行: new_shape.setParentItem(self)
+    #             except Exception as e:
+    #                 print(f"恢复形状时出错: {e}")
+    #                 continue
+                    
+    #         # 重置交互状态
+    #         self.dragging_point = False
+    #         self.moving_shape = False
+    #         self.rotating = False
+    #         self.scaling_rotated_rectangle = False
+            
+    #         # 更新界面
+    #         self.shapesChanged.emit()
+    #         self.update()
+                        
+    #     except Exception as e:
+    #         print(f"撤销操作出错: {e}")
+    #         self.undo_stack = []
+    #         self.update()
+
+
+###############################################
+############ 新撤销回退机制的实现-260307
+############ the revocation/undo mechanism
+###############################################
     def save_state(self):
-        """保存当前形状状态以支持撤销操作，手动创建新的形状对象而不是使用deepcopy"""
-        try:
-            # 创建形状的简化表示，只包含可安全序列化的数据
-            shapes_state = []
-            for shape in self.shapes:
-                try:
-                    # 安全地收集有效点
-                    valid_points = []
-                    for p in shape.pointslist:
-                        if p is not None and isinstance(p, QPointF):
-                            try:
-                                valid_points.append(QPointF(p.x(), p.y()))
-                            except Exception as e:
-                                print(f"无法复制点: {e}")
-                                continue
+            """保存当前形状状态以支持撤销操作，仅提取坐标和属性存入字典以节省内存"""
+            try:
+                # 创建形状的轻量级数据字典表示
+                shapes_state = []
+                for shape in self.shapes:
+                    try:
+                        # 提取为原生元组 (x, y) 而非 QPointF 对象，极大地减少内存开销
+                        valid_points = []
+                        for p in shape.pointslist:
+                            if p is not None and isinstance(p, QPointF):
+                                valid_points.append((p.x(), p.y()))
 
-                    # 检查形状是否有效
-                    if not valid_points:
-                        print(f"跳过无效形状: 没有有效的点")
-                        continue
+                        # 检查形状是否有效
+                        if not valid_points:
+                            continue
 
-                    # 确保多边形至少有3个点，或者其他形状符合要求
-                    if (shape.shape_type == 'polygon' and len(valid_points) < 3) or \
-                            (shape.shape_type == 'rectangle' and len(valid_points) != 2) or \
-                            (shape.shape_type == 'line' and len(valid_points) != 2) or \
-                            (shape.shape_type == 'rotated_rectangle' and len(valid_points) != 4) or \
-                            (shape.shape_type == 'point' and len(valid_points) != 1):
-                        print(f"跳过无效形状: {shape.shape_type} 点数量不正确")
-                        continue
+                        # 确保多边形至少有3个点，或者其他形状符合要求
+                        if (shape.shape_type == 'polygon' and len(valid_points) < 3) or \
+                                (shape.shape_type == 'rectangle' and len(valid_points) != 2) or \
+                                (shape.shape_type == 'line' and len(valid_points) != 2) or \
+                                (shape.shape_type == 'rotated_rectangle' and len(valid_points) != 4) or \
+                                (shape.shape_type == 'point' and len(valid_points) != 1):
+                            continue
 
-                    # 为每个形状创建一个新实例
-                    new_shape = Shape(
-                        label=shape.label,
-                        classnum=shape.classnum,
-                        pointslist=valid_points,
-                        shape_type=shape.shape_type,
-                        group_id=shape.group_id
+                        # 核心优化：将所需数据保存为纯字典，放弃实例化 Shape
+                        state_dict = {
+                            'label': shape.label,
+                            'classnum': shape.classnum,
+                            'pointslist': valid_points,
+                            'shape_type': shape.shape_type,
+                            'group_id': shape.group_id,
+                            'visible': shape.visible,
+                            '_selected': shape._selected,
+                            'rotated_angle': shape.rotated_angle,
+                            '_show_group_id': shape._show_group_id,
+                            'feature_results': shape.feature_results,
+                            'scale_factor': shape.scale_factor
+                        }
+                        shapes_state.append(state_dict)
+                    except Exception as e:
+                        print(f"处理形状状态时出错: {e}")
+                        continue  # 跳过这个形状
 
-                    )
-                    # 复制必要的其他属性
-                    new_shape.visible = shape.visible
-                    new_shape._selected = shape._selected
-                    new_shape.rotated_angle = shape.rotated_angle
-                    new_shape._show_group_id = shape._show_group_id
-                    new_shape.feature_results = shape.feature_results
-                    new_shape.scale_factor = shape.scale_factor
+                # 存储状态
+                self.undo_stack.append(shapes_state)
 
-                    # 添加到状态列表
-                    shapes_state.append(new_shape)
-                except Exception as e:
-                    print(f"处理形状时出错: {e}")
-                    continue  # 跳过这个形状
+                # [DEBUG 验证打印] - 用于在终端确认优化已生效
+                print(f"[DEBUG - 优化验证] save_state 已调用。成功将 {len(shapes_state)} 个形状以轻量字典形式存入撤销堆栈。当前堆栈深度: {len(self.undo_stack)}")
 
-            # 存储状态
-            self.undo_stack.append(shapes_state)
+                # 限制撤销栈大小
+                if len(self.undo_stack) > 4:
+                    self.undo_stack.pop(0)
 
-            # 限制撤销栈大小
-            if len(self.undo_stack) > 4:
-                self.undo_stack.pop(0)
-
-        except Exception as e:
-            print(f"保存状态时出错: {e}")
-            # 错误处理 - 可能需要清空撤销栈以避免进一步问题
-            self.undo_stack = []
+            except Exception as e:
+                print(f"保存状态时出错: {e}")
+                self.undo_stack = []
 
     def undo(self):
-        """安全地恢复到上一个保存的状态"""
-        if not self.undo_stack:
-            return
-
-        try:
-            # 恢复上一个状态
-            previous_shapes = self.undo_stack.pop()
-            scene = self.scene()
-
-            if not scene:
-                print("警告：当前画布没有关联场景")
+            """安全地恢复到上一个保存的状态"""
+            if not self.undo_stack:
                 return
 
-            # 清除当前状态
-            self.selected_shape = []
-            self.hovered_shape = None
+            try:
+                # 恢复上一个状态
+                previous_shapes = self.undo_stack.pop()
+                scene = self.scene()
 
-            
-            # 清除场景中的所有形状
-            for shape in self.shapes.copy():
-                try:
-                    if shape.scene() == scene:
-                        scene.removeItem(shape)
-                    self.shapes.remove(shape)
-                except Exception as e:
-                    print(f"从场景移除形状时出错: {e}")
-            
-            # 确保形状列表为空
-            self.shapes.clear()
-            
-            # 为每个保存的形状创建新的形状对象
-            for saved_shape in previous_shapes:
-                try:
-                    # 创建新的形状对象，保持原有属性
-                    new_shape = Shape(
-                        label=saved_shape.label,
-                        classnum=saved_shape.classnum,
-                        pointslist=[QPointF(p.x(), p.y()) for p in saved_shape.pointslist],
-                        shape_type=saved_shape.shape_type,
-                        group_id=saved_shape.group_id
-                    )
-                    
-                    # 复制其他属性
-                    new_shape.visible = saved_shape.visible
-                    new_shape._selected = saved_shape._selected
-                    new_shape.rotated_angle = saved_shape.rotated_angle
-                    new_shape._show_group_id = saved_shape._show_group_id
-                    new_shape.feature_results = saved_shape.feature_results
-                    
-                    # 只添加到列表和场景，不设置父项
-                    self.shapes.append(new_shape)
-                    # scene.addItem(new_shape)
-                    # 移除这一行: new_shape.setParentItem(self)
-                except Exception as e:
-                    print(f"恢复形状时出错: {e}")
-                    continue
-                    
-            # 重置交互状态
-            self.dragging_point = False
-            self.moving_shape = False
-            self.rotating = False
-            self.scaling_rotated_rectangle = False
-            
-            # 更新界面
-            self.shapesChanged.emit()
-            self.update()
+                if not scene:
+                    print("警告：当前画布没有关联场景")
+                    return
+
+                # 清除当前状态
+                self.selected_shape = []
+                self.hovered_shape = None
+
+                # 清除场景中的所有形状
+                for shape in self.shapes.copy():
+                    try:
+                        if shape.scene() == scene:
+                            scene.removeItem(shape)
+                        self.shapes.remove(shape)
+                    except Exception as e:
+                        print(f"从场景移除形状时出错: {e}")
+                
+                # 确保形状列表为空
+                self.shapes.clear()
+                
+                # 核心优化：为每个保存的轻量级字典重新实例化 Shape 对象
+                for state_dict in previous_shapes:
+                    try:
+                        new_shape = Shape(
+                            label=state_dict['label'],
+                            classnum=state_dict['classnum'],
+                            # 将元组还原为 QPointF
+                            pointslist=[QPointF(x, y) for x, y in state_dict['pointslist']],
+                            shape_type=state_dict['shape_type'],
+                            group_id=state_dict['group_id']
+                        )
                         
-        except Exception as e:
-            print(f"撤销操作出错: {e}")
-            self.undo_stack = []
-            self.update()
-
+                        # 复制其他属性
+                        new_shape.visible = state_dict['visible']
+                        new_shape._selected = state_dict['_selected']
+                        new_shape.rotated_angle = state_dict['rotated_angle']
+                        new_shape._show_group_id = state_dict['_show_group_id']
+                        new_shape.feature_results = state_dict.get('feature_results', {})
+                        new_shape.scale_factor = state_dict.get('scale_factor', 1.0)
+                        
+                        # 只添加到列表和场景，不设置父项
+                        self.shapes.append(new_shape)
+                    except Exception as e:
+                        print(f"恢复形状时出错: {e}")
+                        continue
+                        
+                # [DEBUG 验证打印] - 用于在终端确认优化已生效
+                print(f"[DEBUG - 优化验证] undo 已调用。成功从字典数据恢复了 {len(previous_shapes)} 个形状。")
+                # 【新增：强制阻断所有残留的绘制/交互过程】
+                self.set_mode('edit')  # 强制切回编辑模式
+                self.drawing = False
+                self.current_shape = None
+                self.rotated_rect_stage = 0
+                self.shapeSelected.emit([]) # 确保侧边栏清空高亮
+                # -----------------------------------------------
+                # 重置交互状态
+                self.dragging_point = False
+                self.moving_shape = False
+                self.rotating = False
+                self.scaling_rotated_rectangle = False
+                
+                # 更新界面
+                self.shapesChanged.emit()
+                self.update()
+                            
+            except Exception as e:
+                print(f"撤销操作出错: {e}")
+                self.undo_stack = []
+                self.update()
 ###############################################
 ############ 关于鼠标事件代码==========Hover
 ###############################################
@@ -2087,6 +2230,7 @@ class Canvas(QtWidgets.QGraphicsObject):
 
                 if not points_to_delete:
                     return False  # 没有找到要删除的点
+                self.save_state()
 
                 # 按索引从大到小排序，以便删除时不会影响其他索引
                 points_to_delete.sort(reverse=True)
@@ -2098,7 +2242,6 @@ class Canvas(QtWidgets.QGraphicsObject):
                         shape.update_shape()
 
 
-                self.save_state()
                 self.shapesChanged.emit()
                 return True
 
@@ -2110,8 +2253,8 @@ class Canvas(QtWidgets.QGraphicsObject):
             if shape.visible and shape.shape_type == 'polygon' and shape.selected:
                 shape, index = self.get_shape_at_pos(pos, tolerance=10)
                 if shape and index is not None:
-                    shape.remove_point(index)
                     self.save_state()
+                    shape.remove_point(index)
                     self.shapesChanged.emit()
                     self.update()
                     return True

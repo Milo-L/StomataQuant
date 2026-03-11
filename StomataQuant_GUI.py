@@ -3,9 +3,9 @@ from PyQt5.QtWidgets import QMainWindow, QAction, QToolButton, QMenu, QLabel, QS
 from PyQt5.QtCore import QCoreApplication
 import PyQt5
 import os
-plugin_path = os.path.join(os.path.dirname(PyQt5.__file__), 'Qt', 'plugins')
-print(f"plugin_path: {plugin_path}")
-QCoreApplication.addLibraryPath(plugin_path)
+# plugin_path = os.path.join(os.path.dirname(PyQt5.__file__), 'Qt', 'plugins')
+# print(f"plugin_path: {plugin_path}")
+# QCoreApplication.addLibraryPath(plugin_path)
     # 导入 ShapeListDock 和 LabelListDock
 
 
@@ -159,6 +159,20 @@ class MainWindow(QMainWindow):
         self.actionBatchImportRectangle.setObjectName("actionBatchImportRectangle")
         self.actionBatchImportRotatedRectangle = QtWidgets.QAction(MainWindow)
         self.actionBatchImportRotatedRectangle.setObjectName("actionBatchImportRotatedRectangle")
+        
+        # 创建 Export Feature csv 子菜单
+        self.menuExportFeatureCSV = QtWidgets.QMenu("Export Feature csv", MainWindow)
+        self.menuExportFeatureCSV.setObjectName("menuExportFeatureCSV")
+
+        # 创建四个导出特征动作
+        self.actionExportPolygonFeature = QtWidgets.QAction(MainWindow)
+        self.actionExportPolygonFeature.setObjectName("actionExportPolygonFeature")
+        self.actionExportRotatedRectangleFeature = QtWidgets.QAction(MainWindow)
+        self.actionExportRotatedRectangleFeature.setObjectName("actionExportRotatedRectangleFeature")
+        self.actionExportRectangleFeature = QtWidgets.QAction(MainWindow)
+        self.actionExportRectangleFeature.setObjectName("actionExportRectangleFeature")
+        self.actionExportPointFeature = QtWidgets.QAction(MainWindow)
+        self.actionExportPointFeature.setObjectName("actionExportPointFeature")
 
         # 将动作添加到菜单项
         self.menuFile.addAction(self.actionOpen)
@@ -229,8 +243,18 @@ class MainWindow(QMainWindow):
 
         self.menuMoreInfo.addMenu(self.menuBatchImport)
 
+        # 向 Export Feature csv 子菜单添加四个动作
+        self.menuExportFeatureCSV.addAction(self.actionExportPolygonFeature)
+        self.menuExportFeatureCSV.addAction(self.actionExportRotatedRectangleFeature)
+        self.menuExportFeatureCSV.addAction(self.actionExportRectangleFeature)
+        self.menuExportFeatureCSV.addAction(self.actionExportPointFeature)
+
+        # 将子菜单添加到 More 菜单
+        self.menuMoreInfo.addMenu(self.menuExportFeatureCSV)
+
         self.menuSetting.addAction(self.actionModelSetting)  # 添加动作到 menuSetting
         self.menuSetting.addAction(self.actionInferenceSetting)  # 添加动作到 menuSetting
+                
                 # 在将其他动作添加到More菜单后添加这一行
         self.menuMoreInfo.addSeparator()  # 添加分隔线
         self.menuMoreInfo.addAction(self.actionShortcutHelp)
@@ -444,7 +468,13 @@ class MainWindow(QMainWindow):
         self.actionBatchExportRectangle.setText(_translate("MainWindow", "Batch Export Rectangle annotations"))
         self.actionBatchExportRotatedRectangle.setText(_translate("MainWindow", "Batch Export Rotated Rectangle annotations"))
         
-
+        
+        self.menuExportFeatureCSV.setTitle(_translate("MainWindow", "Export Feature csv"))
+        self.actionExportPolygonFeature.setText(_translate("MainWindow", "Export Polygons' feature of all tabs"))
+        self.actionExportRotatedRectangleFeature.setText(_translate("MainWindow", "Export Rotated Rectangles' feature of all tabs"))
+        self.actionExportRectangleFeature.setText(_translate("MainWindow", "Export Rectangles' feature of all tabs"))
+        self.actionExportPointFeature.setText(_translate("MainWindow", "Export Points' feature of all tabs"))
+                                              
         # 设置批量导出子菜单和动作的文本
         self.actionBatchImportPolygon.setText(_translate("MainWindow", "Batch Import Images and Polygon annotations"))
         self.actionBatchImportRectangle.setText(_translate("MainWindow", "Batch Import Images and Rectangle annotations"))

@@ -1,0 +1,631 @@
+<!DOCTYPE html><html><head>
+      <title>README</title>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      
+      <link rel="stylesheet" href="file:///c:\Users\MiloL\.vscode\extensions\shd101wyy.markdown-preview-enhanced-0.8.20\crossnote\dependencies\katex\katex.min.css">
+      
+      
+      
+      
+      
+      <style>
+      code[class*=language-],pre[class*=language-]{color:#333;background:0 0;font-family:Consolas,"Liberation Mono",Menlo,Courier,monospace;text-align:left;white-space:pre;word-spacing:normal;word-break:normal;word-wrap:normal;line-height:1.4;-moz-tab-size:8;-o-tab-size:8;tab-size:8;-webkit-hyphens:none;-moz-hyphens:none;-ms-hyphens:none;hyphens:none}pre[class*=language-]{padding:.8em;overflow:auto;border-radius:3px;background:#f5f5f5}:not(pre)>code[class*=language-]{padding:.1em;border-radius:.3em;white-space:normal;background:#f5f5f5}.token.blockquote,.token.comment{color:#969896}.token.cdata{color:#183691}.token.doctype,.token.macro.property,.token.punctuation,.token.variable{color:#333}.token.builtin,.token.important,.token.keyword,.token.operator,.token.rule{color:#a71d5d}.token.attr-value,.token.regex,.token.string,.token.url{color:#183691}.token.atrule,.token.boolean,.token.code,.token.command,.token.constant,.token.entity,.token.number,.token.property,.token.symbol{color:#0086b3}.token.prolog,.token.selector,.token.tag{color:#63a35c}.token.attr-name,.token.class,.token.class-name,.token.function,.token.id,.token.namespace,.token.pseudo-class,.token.pseudo-element,.token.url-reference .token.variable{color:#795da3}.token.entity{cursor:help}.token.title,.token.title .token.punctuation{font-weight:700;color:#1d3e81}.token.list{color:#ed6a43}.token.inserted{background-color:#eaffea;color:#55a532}.token.deleted{background-color:#ffecec;color:#bd2c00}.token.bold{font-weight:700}.token.italic{font-style:italic}.language-json .token.property{color:#183691}.language-markup .token.tag .token.punctuation{color:#333}.language-css .token.function,code.language-css{color:#0086b3}.language-yaml .token.atrule{color:#63a35c}code.language-yaml{color:#183691}.language-ruby .token.function{color:#333}.language-markdown .token.url{color:#795da3}.language-makefile .token.symbol{color:#795da3}.language-makefile .token.variable{color:#183691}.language-makefile .token.builtin{color:#0086b3}.language-bash .token.keyword{color:#0086b3}pre[data-line]{position:relative;padding:1em 0 1em 3em}pre[data-line] .line-highlight-wrapper{position:absolute;top:0;left:0;background-color:transparent;display:block;width:100%}pre[data-line] .line-highlight{position:absolute;left:0;right:0;padding:inherit 0;margin-top:1em;background:hsla(24,20%,50%,.08);background:linear-gradient(to right,hsla(24,20%,50%,.1) 70%,hsla(24,20%,50%,0));pointer-events:none;line-height:inherit;white-space:pre}pre[data-line] .line-highlight:before,pre[data-line] .line-highlight[data-end]:after{content:attr(data-start);position:absolute;top:.4em;left:.6em;min-width:1em;padding:0 .5em;background-color:hsla(24,20%,50%,.4);color:#f4f1ef;font:bold 65%/1.5 sans-serif;text-align:center;vertical-align:.3em;border-radius:999px;text-shadow:none;box-shadow:0 1px #fff}pre[data-line] .line-highlight[data-end]:after{content:attr(data-end);top:auto;bottom:.4em}html body{font-family:'Helvetica Neue',Helvetica,'Segoe UI',Arial,freesans,sans-serif;font-size:16px;line-height:1.6;color:#333;background-color:#fff;overflow:initial;box-sizing:border-box;word-wrap:break-word}html body>:first-child{margin-top:0}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{line-height:1.2;margin-top:1em;margin-bottom:16px;color:#000}html body h1{font-size:2.25em;font-weight:300;padding-bottom:.3em}html body h2{font-size:1.75em;font-weight:400;padding-bottom:.3em}html body h3{font-size:1.5em;font-weight:500}html body h4{font-size:1.25em;font-weight:600}html body h5{font-size:1.1em;font-weight:600}html body h6{font-size:1em;font-weight:600}html body h1,html body h2,html body h3,html body h4,html body h5{font-weight:600}html body h5{font-size:1em}html body h6{color:#5c5c5c}html body strong{color:#000}html body del{color:#5c5c5c}html body a:not([href]){color:inherit;text-decoration:none}html body a{color:#08c;text-decoration:none}html body a:hover{color:#00a3f5;text-decoration:none}html body img{max-width:100%}html body>p{margin-top:0;margin-bottom:16px;word-wrap:break-word}html body>ol,html body>ul{margin-bottom:16px}html body ol,html body ul{padding-left:2em}html body ol.no-list,html body ul.no-list{padding:0;list-style-type:none}html body ol ol,html body ol ul,html body ul ol,html body ul ul{margin-top:0;margin-bottom:0}html body li{margin-bottom:0}html body li.task-list-item{list-style:none}html body li>p{margin-top:0;margin-bottom:0}html body .task-list-item-checkbox{margin:0 .2em .25em -1.8em;vertical-align:middle}html body .task-list-item-checkbox:hover{cursor:pointer}html body blockquote{margin:16px 0;font-size:inherit;padding:0 15px;color:#5c5c5c;background-color:#f0f0f0;border-left:4px solid #d6d6d6}html body blockquote>:first-child{margin-top:0}html body blockquote>:last-child{margin-bottom:0}html body hr{height:4px;margin:32px 0;background-color:#d6d6d6;border:0 none}html body table{margin:10px 0 15px 0;border-collapse:collapse;border-spacing:0;display:block;width:100%;overflow:auto;word-break:normal;word-break:keep-all}html body table th{font-weight:700;color:#000}html body table td,html body table th{border:1px solid #d6d6d6;padding:6px 13px}html body dl{padding:0}html body dl dt{padding:0;margin-top:16px;font-size:1em;font-style:italic;font-weight:700}html body dl dd{padding:0 16px;margin-bottom:16px}html body code{font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:.85em;color:#000;background-color:#f0f0f0;border-radius:3px;padding:.2em 0}html body code::after,html body code::before{letter-spacing:-.2em;content:'\00a0'}html body pre>code{padding:0;margin:0;word-break:normal;white-space:pre;background:0 0;border:0}html body .highlight{margin-bottom:16px}html body .highlight pre,html body pre{padding:1em;overflow:auto;line-height:1.45;border:#d6d6d6;border-radius:3px}html body .highlight pre{margin-bottom:0;word-break:normal}html body pre code,html body pre tt{display:inline;max-width:initial;padding:0;margin:0;overflow:initial;line-height:inherit;word-wrap:normal;background-color:transparent;border:0}html body pre code:after,html body pre code:before,html body pre tt:after,html body pre tt:before{content:normal}html body blockquote,html body dl,html body ol,html body p,html body pre,html body ul{margin-top:0;margin-bottom:16px}html body kbd{color:#000;border:1px solid #d6d6d6;border-bottom:2px solid #c7c7c7;padding:2px 4px;background-color:#f0f0f0;border-radius:3px}@media print{html body{background-color:#fff}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{color:#000;page-break-after:avoid}html body blockquote{color:#5c5c5c}html body pre{page-break-inside:avoid}html body table{display:table}html body img{display:block;max-width:100%;max-height:100%}html body code,html body pre{word-wrap:break-word;white-space:pre}}.markdown-preview{width:100%;height:100%;box-sizing:border-box}.markdown-preview ul{list-style:disc}.markdown-preview ul ul{list-style:circle}.markdown-preview ul ul ul{list-style:square}.markdown-preview ol{list-style:decimal}.markdown-preview ol ol,.markdown-preview ul ol{list-style-type:lower-roman}.markdown-preview ol ol ol,.markdown-preview ol ul ol,.markdown-preview ul ol ol,.markdown-preview ul ul ol{list-style-type:lower-alpha}.markdown-preview .newpage,.markdown-preview .pagebreak{page-break-before:always}.markdown-preview pre.line-numbers{position:relative;padding-left:3.8em;counter-reset:linenumber}.markdown-preview pre.line-numbers>code{position:relative}.markdown-preview pre.line-numbers .line-numbers-rows{position:absolute;pointer-events:none;top:1em;font-size:100%;left:0;width:3em;letter-spacing:-1px;border-right:1px solid #999;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}.markdown-preview pre.line-numbers .line-numbers-rows>span{pointer-events:none;display:block;counter-increment:linenumber}.markdown-preview pre.line-numbers .line-numbers-rows>span:before{content:counter(linenumber);color:#999;display:block;padding-right:.8em;text-align:right}.markdown-preview .mathjax-exps .MathJax_Display{text-align:center!important}.markdown-preview:not([data-for=preview]) .code-chunk .code-chunk-btn-group{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .status{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .output-div{margin-bottom:16px}.markdown-preview .md-toc{padding:0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link div,.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}.markdown-preview .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}.scrollbar-style::-webkit-scrollbar{width:8px}.scrollbar-style::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}.scrollbar-style::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode]){position:relative;width:100%;height:100%;top:0;left:0;margin:0;padding:0;overflow:auto}html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{position:relative;top:0;min-height:100vh}@media screen and (min-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em calc(50% - 457px + 2em)}}@media screen and (max-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{font-size:14px!important;padding:1em}}@media print{html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{display:none}}html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{position:fixed;bottom:8px;left:8px;font-size:28px;cursor:pointer;color:inherit;z-index:99;width:32px;text-align:center;opacity:.4}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] #sidebar-toc-btn{opacity:1}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc{position:fixed;top:0;left:0;width:300px;height:100%;padding:32px 0 48px 0;font-size:14px;box-shadow:0 0 4px rgba(150,150,150,.33);box-sizing:border-box;overflow:auto;background-color:inherit}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar{width:8px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc a{text-decoration:none}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc{padding:0 16px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link div,html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{left:300px;width:calc(100% - 300px);padding:2em calc(50% - 457px - 300px / 2);margin:0;box-sizing:border-box}@media screen and (max-width:1274px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{width:100%}}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .markdown-preview{left:50%;transform:translateX(-50%)}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .md-sidebar-toc{display:none}
+/* Please visit the URL below for more information: */
+/*   https://shd101wyy.github.io/markdown-preview-enhanced/#/customize-css */
+
+      </style>
+      <!-- The content below will be included at the end of the <head> element. --><script type="text/javascript">
+  document.addEventListener("DOMContentLoaded", function () {
+    // your code here
+  });
+</script></head><body for="html-export">
+    
+    
+      <div class="crossnote markdown-preview  ">
+      
+<p align="center">
+<img src="readme_medias\0_title.jpg" alt="0_title" width="100%">
+</p>
+<summary style="font-size:1.5em;font-weight:bold;"> 📑 Table of contents</summary>
+<ul>
+<li><a href="#overview">🌏 Overview</a></li>
+<li><a href="#getting-started">🏃‍♀️‍➡️ Getting Started</a>
+<ul>
+<li><a href="#using-the-packaged-application">💻 Using the Packaged Application </a></li>
+<li><a href="#using-the-source-code">🧑‍💻 Using the Source Code </a></li>
+</ul>
+</li>
+<li><a href="#program-usage-guide">📄 Program Usage Guide</a>
+<ul>
+<li><a href="#key-features">😎 Key Features</a></li>
+<li><a href="#basic-operation-flow">📣 Basic Operation Flow</a></li>
+<li><a href="#common_usage_scenarios">🕵️ Common usage scenarios</a></li>
+</ul>
+</li>
+<li><a href="#dataset-used-for-training-the-model">📖 Dataset used for training the model</a></li>
+<li><a href="#technical-architecture">🧩 Software Architecture</a>
+<ul>
+<li><a href="#code-file-structure">🗃️ Code file structure</a></li>
+</ul>
+</li>
+<li><a href="#license">📜 License</a></li>
+<li><a href="#contact-us">🤝 Contact Us</a></li>
+</ul>
+<hr>
+<p><a id="overview" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;"> 🌏 Overview </summary>
+<ul>
+<li><strong>StomataQuant is a graphical user interface (GUI) software specifically developed for processing and analyzing plant epidermal stomatal images.</strong></li>
+<li><strong>It integrates deep learning and computer vision techniques to automatically detect, segment, and quantify stomata, pores, and pavement cells on plant epidermis, and provides detailed measurement data.</strong></li>
+<li><strong>More importantly, StomataQuant also offers comprehensive and intuitive manual correction features, allowing users to directly adjust and edit the AI-generated results to ensure the accuracy and reliability of the analysis.</strong></li>
+</ul>
+<p align="center">
+<img src="readme_medias\1_overview_demo_stomatadetect.gif" alt="1_overview_demo_stomatadetect" width="32%">
+<img src="readme_medias\1_overview_demo_stoma_pore.gif" alt="1_overview_demo_stoma_pore" width="32%">
+<img src="readme_medias\1_overview_demo_stoma_pvc.gif" alt="1_overview_demo_stoma_pvc" width="32%">
+</p>
+<hr>
+<p><a id="getting-started" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;">🏃‍♀️‍➡️ Getting Started</summary>
+<ul>
+<li><strong>This program can be downloaded in two ways:</strong>
+<ol>
+<li>Download the <a href="#using-the-packaged-application">packaged application</a> (<strong>recommended for users without programming experience</strong>);</li>
+<li>Or download the <a href="#using-the-source-code">source code</a> from GitHub.</li>
+</ol>
+</li>
+</ul>
+<p><a id="using-the-packaged-application" href=""></a></p>
+<details>
+<summary style="padding-left: 1em;"><strong>💻 Using the Packaged Application</strong></summary>
+<ol>
+<li>
+<p><strong>Application Download</strong></p>
+<ul>
+<li><strong>Windows</strong>
+<ul>
+<li>CPU only Application (<strong>Recommended, Most Stable 课程同学请下载这个版本</strong>) | <a href="https://disk.pku.edu.cn/link/AA8F33F941B9064C209AA18CA1B9BFEAB4">Download</a>| Extract Code: <code>fZuH</code></li>
+<li>GPU Application (CUDA Version &gt; 12.4) | [Download]</li>
+<li>CPU only Application | [Download]</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Model Weights Download</strong></p>
+<ul>
+<li>You can choose different types of models according to your task, and select different-sized models based on the performance of your computer, from <strong>n</strong>(nano), <strong>s</strong>(small), m(medium), <strong>l</strong>(large), <strong>xl</strong>(extra large).</li>
+</ul>
+<ul>
+<li>We recommend using the <strong>xl</strong>-sized model to achieve better inference results. However, the drawback is that without GPU acceleration, the inference time will be longer.</li>
+</ul>
+<ul>
+<li><strong>All Models</strong> | [Download]
+<ul>
+<li><strong>Stomata Detection</strong> | <a href="https://disk.pku.edu.cn/link/AA7C4E6A7F2FD84189A80655F6E6D1F25D">Download</a> | Extract Code: <code>pXIp</code></li>
+<li><strong>Stoma and Pore Segmentation</strong> | [Download]</li>
+<li><strong>Stoma and Pavement Cell Segmentation</strong> | <a href="https://disk.pku.edu.cn/link/AAA8FD558F0A8741FE8808453D4845B273">Download</a> | Extract Code: <code>D2l3</code></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Before Running the Packaged Application (Preliminary Steps)</strong></p>
+</li>
+</ol>
+<details>
+<summary style="padding-left: 3em;"><strong>&nbsp;&nbsp;&nbsp;&nbsp; Windows:</strong></summary>
+<ul>
+<li>After downloading, extract the files to a folder.
+<ul>
+<li>Using the default decompression tool provided by the Windows 11 system might be rather slow. It is recommended to use a dedicated decompression tool instead. <strong>Important:</strong> Ensure that the file path contains <strong>no special characters or Chinese characters. 请确保安装文件夹路径无中文字符，不然软件解析会报错</strong></li>
+<li>The app folder contains the executable, source code (in the <code>src</code> subfolder), and a specific Python interpreter (in the <code>Python</code> subfolder). <strong>Do not rename or modify these folders unless you intend to change the application's functionality.</strong></li>
+<li>To run the application without making any modifications, simply execute either <code>StomataQuant_c.exe</code> or <code>StomataQuant_GPU_c.exe</code>.</li>
+<li>Upon running the program, a <strong>terminal</strong> window will open to display program-related information. You can <strong>minimize this window but do not close it</strong>.</li>
+</ul>
+</li>
+</ul>
+<p align="center">
+<img src="readme_medias\2_windows_startup.gif" alt="2_windows_startup" width="70%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 3em;"><strong> &nbsp;&nbsp;&nbsp;&nbsp; macOS:</strong></summary>
+<ul>
+<li><strong>After downloading, you need to make the application executable</strong></li>
+</ul>
+<ol>
+<li>Open the terminal. Navigate to the directory where you downloaded the file. Run the following command to make SQ_Mac executable:</li>
+</ol>
+<pre data-role="codeBlock" data-info="bash" class="language-bash bash"><code><span class="token function">chmod</span> +x SQ_Mac
+</code></pre><ul>
+<li>This command grants <strong>execute permissions</strong> to the SQ_Mac file.</li>
+</ul>
+<ol start="2">
+<li>Run the program. You might need to allow the program to run in your system's  Security &amp; Privacy settings if it was downloaded from an external source. This is a standard macOS security measure.</li>
+</ol>
+<p align="center">
+<img src="readme_medias\2_macos_download_chmod+x.gif" alt="2_macos_download_chmod+x" width="50%">
+<img src="readme_medias\2_mac_os_privacy.png" alt="2_mac_os_privacy" width="32%">
+</p>
+<ol start="3">
+<li>Upon running the program, a <strong>terminal</strong> window will open to display program-related information. You can <strong>minimize this window but do not close it</strong>. Wait for the program to launch. Note that startup on macOS might take longer due to system checks and package loading."</li>
+</ol>
+<p align="center">
+<img src="readme_medias\2_mac_os_cml_open.png" alt="2_mac_os_cml_open" width="40%">
+<img src="readme_medias\2_macos_startup.gif" alt="2_macos_startup" width="48%">
+</p>
+</details>
+</details>
+<p><a id="using-the-source-code" href=""></a></p>
+<details>
+<summary style="padding-left: 1em;"><strong>🧑‍💻 Using the Source Code </strong></summary>
+<ol>
+<li><strong>Clone the repository</strong><pre data-role="codeBlock" data-info="" class="language-text"><code>git clone https://github.com/Milo-L/StomataQuant.git
+</code></pre></li>
+<li><strong>Install dependencies</strong><pre data-role="codeBlock" data-info="" class="language-text"><code>pip install -r SQ_gpu_requirements.txt
+</code></pre>or<pre data-role="codeBlock" data-info="" class="language-text"><code>pip install -r SQ_cpu_requirements.txt
+</code></pre></li>
+<li><strong>Run the application using your Python interpreter, and don't forget to download the necessary <a href="#using-the-packaged-application">model files</a></strong><pre data-role="codeBlock" data-info="" class="language-text"><code>python Load_StomataQuant_GUI.py
+</code></pre></li>
+</ol>
+</details>
+<hr>
+<p><a id="program-usage-guide" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;">📄 Program Usage Guide</summary>
+<a id="key-features" href=""></a>
+<details>
+<summary style="padding-left: 1em;"><strong>😎 Key Features</strong></summary>
+<ol>
+<li><strong>AI-driven Detection and Segmentation:</strong>
+<ul>
+<li>Integrates YOLO object detection and segmentation models for automated stomata detection and stoma, pore, and pavement cell segmentation.</li>
+</ul>
+</li>
+<li><strong>Result Editing Capability:</strong>
+<ul>
+<li>Allows for manual verification and editing of AI inference outcomes.</li>
+</ul>
+</li>
+<li><strong>Measurement and Analysis:</strong>
+<ul>
+<li>Extraction of shape features such as count, area, perimeter, etc., with the available features varying depending on the shape type.</li>
+</ul>
+</li>
+<li><strong>Comprehensive Annotation Tools and Management:</strong>
+<ul>
+<li>Offers a variety of manual annotation tools, including polygons, rectangles, rotated rectangles, lines, and points, with integrated support for importing and exporting these annotation types.</li>
+</ul>
+</li>
+<li><strong>Batch Processing Capability:</strong>
+<ul>
+<li>Allows for automated execution of model inference and analysis tasks on multiple loaded images.</li>
+</ul>
+</li>
+<li><strong>Heatmap Generation:</strong>
+<ul>
+<li>Generates feature distribution heatmaps for intuitive visualization of analysis results (as depicted in following figure ).</li>
+</ul>
+</li>
+</ol>
+<p align="center">
+<img src="readme_medias\3_heatmap_generated_by_StomataQuant.jpg" alt="3_heatmap_generated_by_StomataQuant" width="70%">
+</p>
+</details>
+<p><a id="basic-operation-flow" href=""></a></p>
+<summary style="padding-left: 1em;"><strong>📣 Basic Operation Flow</strong></summary>
+<details>
+<summary style="padding-left: 1.5em;"><strong>01. Load Images</strong></summary>
+<ul>
+<li>Click <code>File</code> → <code>Open images</code></li>
+<li>Select the images to be analyzed</li>
+<li>The images will be displayed in the main window and can be managed through tabs</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3_openfile.gif" alt="3_openfile" width="70%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>02. Select Model Based on Purpose</strong></summary>
+<ul>
+<li>Click <code>Setting</code>→<code>Model Setting</code>
+<ul>
+<li>If you are focusing on the number or distribution of stomata, or measuring stomatal density:
+<ul>
+<li>→ Select <code>stomata detection model</code></li>
+<li>The inference result will be <strong>rectangle</strong> bounding boxes around potential stomatal complexes.</li>
+</ul>
+</li>
+<li>If you are focusing on stomatal or pore size, or measuring stomatal aperture or size:
+<ul>
+<li>→ Select <code>stoma and pore segmentation model</code></li>
+<li>The inference result will be <strong>polygon</strong> shapes outlining potential stomata and their pores.</li>
+</ul>
+</li>
+<li>If you are focusing on pavement cells, or measuring stomatal index and pavement cell shape descriptors:
+<ul>
+<li>→ Select <code>stoma and pavement cell segmentation model</code></li>
+<li>The inference result will be <strong>polygon</strong> shapes outlining potential stomatal complexes and pavement cells.</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>03. AI Inference</strong></summary>
+<ul>
+<li>Click <code>AI😎</code> button → Run inference to execute automatic detection or segmentation</li>
+<li>Inference results will be directly displayed on the image as shown in the following figures</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3_detect_model.gif" alt="3_detect_model" width="32%">
+<img src="readme_medias\3_stoma_pore_model.gif" alt="3_stoma_pore_model" width="32%">
+<img src="readme_medias\3_stoma_pvc_model.gif" alt="3_stoma_pvc_model" width="32%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>04. Confirm Inference Results (Optional)</strong></summary>
+<ul>
+<li>Confirm whether the inference results are correct</li>
+<li>If errors occur, the corresponding shapes can be <a href="#shape-editing">edited</a> manually</li>
+</ul>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>05. Feature Extraction</strong></summary>
+<ol>
+<li>Set the scale: <code>Analyze</code> → <code>Set Measuring Scale</code></li>
+<li>Click <code>Feature Extraction</code> button</li>
+<li>The results will be displayed on the right-side <code>ResultsSummary</code> and <code>MeasuredResults</code> sub-windows</li>
+<li>You can choose to copy or export the results to a CSV file</li>
+</ol>
+<p align="center">
+<img src="readme_medias\3_getfeature1.jpg" alt="3_getfeature1" width="32%">
+<img src="readme_medias\3_getfeature2.jpg" alt="3_getfeature2" width="32%">
+<img src="readme_medias\3_getfeature3.jpg" alt="3_getfeature3" width="32%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Workflow Summary</strong></summary>
+<p align="center">
+<img src="readme_medias\3_workflow.jpg" alt="3_workflow" width="70%">
+</p>
+</details>
+<p><a id="common_usage_scenarios" href=""></a></p>
+<summary style="padding-left: 1em;"><strong>🕵️ Common usage scenarios</strong></summary>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Rapid measurement of stomatal aperture or size</strong></summary>
+<ul>
+<li>If you want to <strong>measure stomatal aperture or size</strong> and quickly edit inference results:
+<ol>
+<li>You can use the <code>GetMER</code> button after model inference to obtain the minimum bounding rotated rectangle of the polygons;</li>
+<li>You can set the polygons to be invisible and only display the rotated rectangles for quick editing;</li>
+<li>After editing, click <code>Feature Extraction</code> to quickly obtain stomatal aperture and size data.</li>
+</ol>
+</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3_rapid_stomatal_apeature.gif" alt="3_rapid_stomatal_apeature" width="70%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Rapid measurement of stomatal index</strong></summary>
+<ul>
+<li>If you want to quickly <strong>measure the stomatal index</strong> and edit the inference results, you can use <code>Analyze</code>→ <code>Shape Filter</code> to select the shapes you want to filter out that are located on certain edges after model inference;</li>
+<li>Then you can use <code>View</code>→<code>All shapes are displayed as points</code> to replace each shape (each represents a cell) with a point;</li>
+<li>Next, confirm and count the cells by adding or deleting points;</li>
+<li>Finally, calculate the stomatal index based on the number of stomata and pavement cells.</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3_rapid_stomatal_index.gif" alt="3_rapid_stomatal_index" width="70%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Heatmap generation</strong></summary>
+<ul>
+<li>After completing polygon feature extraction;</li>
+<li>Click <code>View</code> → <code>Heatmap of polygon features</code>;</li>
+<li>Select the <strong>feature type</strong> and <strong>color scheme</strong> for the heatmap, as well as the <strong>output location</strong>;</li>
+<li>Then, wait for the generation of the heatmap.</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3_heatmap_generated.gif" alt="3_heatmap_generated" width="70%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Batch processing</strong></summary>
+<ul>
+<li>Open multiple image tabs;</li>
+<li>Click <code>More</code> → <code>Batch Processing</code>;</li>
+<li>Select the operation you want to be performed (<strong>AI inference, feature extraction, etc.</strong>), as illustrated on the left;</li>
+<li>And initiate batch processing. The example on the right showcases the rapid determination of stomatal aperture <strong>in batches</strong>.</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3_BatchProcess.jpg" alt="3_BatchProcess" width="49%">
+<img src="readme_medias\3_batch_example.gif" alt="3_batch_example" width="49%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Shape Creation</strong></summary>
+<ul>
+<li>
+<p>Supports creating <strong>polygons, rotated rectangles, rectangles, lines, and points</strong>.</p>
+<ul>
+<li><strong>Create Polygon:</strong>
+<ol>
+<li>Click <code>Create</code>→<code>Create Polygon</code>;</li>
+<li><code>Left-click</code> on the image to start drawing, and each <code>left-click</code> creates a vertex of the polygon;</li>
+<li>After creating the polygon, you can quickly finish drawing by <strong>double-clicking</strong> or by <code>clicking the first point</code> to finish the shape.</li>
+</ol>
+</li>
+<li><strong>Create RotatedRectangle:</strong>
+<ol>
+<li>Click <code>Create</code>→<code>Create RotatedRectangle</code>;</li>
+<li><code>Left-click</code> to set the first point of the rotated rectangle, <code>release</code> the left mouse button to record the second point, which defines one side of the rotated rectangle;</li>
+<li>Click again to define the entire rotated rectangle.</li>
+</ol>
+</li>
+</ul>
+  <p align="center">
+  <img src="readme_medias\3c_create_polygon.gif" alt="3c_create_polygon" width="49%">
+  <img src="readme_medias\3c_create_rotatedrectangle.gif" alt="3c_create_rotatedrectangle" width="49%">
+  </p>       
+<ul>
+<li><strong>Create Rectangle:</strong>
+<ol>
+<li>Click <code>Create</code>→<code>Create Rectangle</code>;</li>
+<li><code>Left-click</code> to set the top-left corner of the rectangle;</li>
+<li><code>Release</code> the left mouse button to set the bottom-right corner of the rectangle, completing the creation.</li>
+</ol>
+</li>
+<li><strong>Create Line:</strong>
+<ol>
+<li>Click <code>Create</code>→<code>Create Line</code>;</li>
+<li><code>Left-click</code> to confirm one point of the line;</li>
+<li><code>Release</code> the left mouse button to confirm the other point of the line, completing the creation.</li>
+</ol>
+</li>
+<li><strong>Create Point:</strong>
+<ol>
+<li>Click <code>Create</code>→<code>Create Point</code>;</li>
+<li><code>Left-click</code> to create a point.</li>
+</ol>
+</li>
+</ul>
+  <p align="center">
+  <img src="readme_medias\3c_create_rectangle.gif" alt="3c_create_rectangle" width="32%">
+  <img src="readme_medias\3c_create_line.gif" alt="3c_create_line" width="32%">
+  <img src="readme_medias\3c_create_point.gif" alt="3c_create_point" width="32%">
+  </p>
+</li>
+</ul>
+</details>
+<a id="shape-editing" href=""></a>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Shape Editing</strong></summary>
+<ul>
+<li>
+<p>Supports editing <strong>polygons, rotated rectangles, rectangles, lines, and points.</strong></p>
+<ul>
+<li>After selecting a shape, click the <code>Delete</code> button or press the <code>Delete</code> or <code>Backspace</code> key on the keyboard to delete it;</li>
+<li>Press <code>Ctrl + C</code> or the <code>Duplicate</code> button to copy the shape;</li>
+<li><code>Left-click</code> and drag the inside of a shape to move it.</li>
+</ul>
+</li>
+<li>
+<p><strong>Edit Polygon:</strong></p>
+<ul>
+<li><code>Left-click</code> and drag an endpoint to move it;</li>
+<li>Right-click on an endpoint to delete the vertex;</li>
+<li><code>Ctrl + Right-click</code> on an endpoint to delete multiple vertices in batch;</li>
+<li><code>Left-click</code> on the line segment between two endpoints to add a new endpoint.</li>
+</ul>
+</li>
+<li>
+<p><strong>Edit RotatedRectangle:</strong></p>
+<ul>
+<li><code>Left-click</code> and drag an endpoint to scale the rotated rectangle;</li>
+<li><code>Left-click</code> and drag the rotation control point to rotate the rotated rectangle.</li>
+</ul>
+</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3e_edit_polygon.gif" alt="3e_edit_polygon" width="49%">
+<img src="readme_medias\3e_edit_rotatedrectangle.gif" alt="3e_edit_rotatedrectangle" width="49%">
+</p>     
+<ul>
+<li>
+<p><strong>Edit Rectangle:</strong></p>
+<ul>
+<li><code>Left-click</code> and drag an endpoint to scale the rectangle;</li>
+</ul>
+</li>
+<li>
+<p><strong>Edit Line:</strong></p>
+<ul>
+<li><code>Left-click</code> and drag its endpoint to move the endpoint;</li>
+<li>Click on the midpoint of the line to move the line segment.</li>
+</ul>
+</li>
+<li>
+<p><strong>Edit Point:</strong></p>
+<ul>
+<li><code>Left-click</code> and drag to move the point.</li>
+</ul>
+</li>
+</ul>
+<p align="center">
+<img src="readme_medias\3e_edit_rectangle.gif" alt="3e_edit_rectangle" width="32%">
+<img src="readme_medias\3e_edit_line.gif" alt="3e_edit_line" width="32%">
+<img src="readme_medias\3e_edit_point.gif" alt="3e_edit_point" width="32%">
+</p>
+</details>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Shape Annotation Import and Export</strong></summary>
+<ul>
+<li>The ability to import or save annotations from external sources is crucial, whether for archiving measurement results or for accumulating data to <a href="#train-a-new-model">train and fine-tune future models</a>.
+<ul>
+<li>Supports importing and exporting annotations for a <strong>single image</strong>;</li>
+<li>Also supports <strong>exporting shape annotations</strong> for all images currently open in tabs;</li>
+<li>Also supports <strong>batch importing annotations</strong> and opening images.</li>
+<li>Currently, annotation import and export only supports <strong>YOLO format</strong> for <strong>Rectangle, RotatedRectangle (OBB), and Polygon</strong>.</li>
+</ul>
+</li>
+</ul>
+</details>
+<a id="train-a-new-model" href=""></a>
+<details>
+<summary style="padding-left: 1.5em;"><strong>Training New Models and Contributing</strong></summary>
+<ul>
+<li>
+<p>To train a new model or fine-tune an existing one, please refer to the official <a href="https://docs.ultralytics.com/modes/train/">Ultralytics training documentation</a>, which offers comprehensive guidance on dataset preparation, training parameter configuration, and the training process itself.</p>
+</li>
+<li>
+<p><strong>If you're interested in contributing to StomataQuant, you can prepare annotated datasets and <a href="#contact-us">contact us</a>. We plan to release next-generation models for community use in the future.</strong></p>
+</li>
+</ul>
+</details>
+<hr>
+<p><a id="dataset-used-for-training-the-model" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;">📖 Dataset used for training the model</summary>
+<ul>
+<li>Dataset for the stomata detection model | <a href="">Download</a></li>
+<li>Dataset for the stoma and pore segmentation model | <a href="">Download</a></li>
+<li>Dataset for the stoma and pavement cell segmentation model | <a href="">Download</a></li>
+</ul>
+<p align="center">
+<img src="readme_medias\4_dataset.jpg" alt="4_dataset" width="70%">
+</p>
+<p><a id="technical-architecture" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;">🧩 Software Architecture</summary>
+<ul>
+<li><strong>UI framework</strong>: <a href="https://www.riverbankcomputing.com/static/Docs/PyQt5/">PyQt5</a></li>
+<li><strong>Deep Learning Model Training and  Inference</strong>: <a href="https://github.com/ultralytics/ultralytics">YOLOv11 (Ultralytics)</a></li>
+<li><strong>Shape and Data Analysis</strong>:
+<ul>
+<li><a href="https://github.com/opencv/opencv">OpenCV</a></li>
+<li><a href="https://github.com/python-pillow/Pillow">PIL (Pillow)</a></li>
+<li><a href="https://github.com/numpy/numpy">NumPy</a></li>
+<li><a href="https://github.com/shapely/shapely">shapely</a></li>
+</ul>
+</li>
+<li><strong>Program Acceleration</strong>: <a href="https://github.com/numba/numba">numba</a></li>
+<li><strong>Heatmap Visualization</strong>: <a href="https://github.com/matplotlib/matplotlib">Matplotlib</a><br>
+<a id="code-file-structure" href=""></a></li>
+</ul>
+<details>
+<summary style="padding-left: 1em;"><strong>🗃️ Code file structure</strong></summary>
+<ul>
+<li>StomataQuant-GUI is designed with a <strong>modular architecture</strong>, consisting of the following key components:</li>
+</ul>
+<ol>
+<li>
+<p><strong>Main Application Files</strong></p>
+<ul>
+<li><strong><code>Load_StomataQuant_GUI.py</code></strong>: Entry point of the application, responsible for loading and initializing the main application window. Contains the <code>UIMainWindow</code> class that implements most core functionalities and event handling.</li>
+<li><strong><code>StomataQuant_GUI.py</code></strong>: Contains the <code>MainWindow</code> class which sets up basic UI elements including menu bars, toolbars, status bars, and initial layouts.</li>
+</ul>
+</li>
+<li>
+<p><strong>Graphics and Drawing Components</strong></p>
+<ul>
+<li><strong><code>shape.py</code></strong>: Defines the <code>Shape</code> class representing various graphical objects (polygons, rectangles, rotated rectangles, lines, points, etc.). Implements drawing, feature extraction, and geometric operation methods.</li>
+<li><strong><code>canvas.py</code></strong>: Implements the <code>Canvas</code> class serving as the main drawing area. Handles mouse events, shape creation, editing, and user interactions.</li>
+<li><strong><code>ImageGraphicsView.py</code></strong>: Provides the <code>ImageGraphicsView</code> class that manages image display, zooming, and image-related interaction functionalities.</li>
+</ul>
+</li>
+<li>
+<p><strong>Inference and Processing Components</strong></p>
+<ul>
+<li><strong><code>InferenceThread.py</code></strong>: Contains thread implementations for AI and image processing:
+<ul>
+<li><code>YOLOSegInferenceThread</code>: Performs YOLO segmentation inference</li>
+<li><code>PolygonProcessThread</code>: Processes polygon data</li>
+<li><code>ABorADInferenceThread</code>: Performs AD and AB classification</li>
+<li><code>HeatMapGenerationThread</code>: Generates heat maps</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Interface Components</strong></p>
+<ul>
+<li><strong><code>dock_widgets.py</code></strong>: Implements multiple dock windows:
+<ul>
+<li><code>ShapeListDock</code>: Displays current shape list</li>
+<li><code>LabelListDock</code>: Manages labels</li>
+<li><code>MeasuredResultsDock</code>: Shows measurement results of shapes</li>
+<li><code>ImageResultsSummaryDock</code>: Displays image analysis summary</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Batch Processing Functionality</strong></p>
+<ul>
+<li><strong><code>BatchProcessor.py</code></strong>: Implements batch processing features:
+<ul>
+<li><code>BatchProcessor</code>: Performs operations on multiple tabs</li>
+<li><code>BatchExporter</code>: Exports annotations in bulk</li>
+<li><code>BatchImporter</code>: Imports annotations and images in bulk</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Dialog Components</strong></p>
+<ul>
+<li><strong><code>AllDialogs.py</code></strong>: Contains various dialogs:
+<ul>
+<li><code>BatchProcessingDialog</code>: Batch processing settings</li>
+<li><code>BatchProgressDialog</code>: Batch processing progress display</li>
+<li><code>InferenceSettingsDialog</code>: Inference settings</li>
+<li><code>SetMeasuringScaleDialog</code>: Measurement scale settings</li>
+<li><code>LabelInputDialog</code>: Label input</li>
+<li><code>ColorSettingsDialog</code>: Color settings</li>
+<li><code>HeatMapDialog</code>: Heat map generation settings</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Resources</strong></p>
+<ul>
+<li><strong><code>resources_rc.py</code></strong>: Contains compiled resources for the application (icons, images, etc.), generated from Qt Resource Collection (.qrc) files. Used to embed binary resources that can be accessed with the ":/resource_path" notation throughout the application.</li>
+</ul>
+</li>
+</ol>
+</details>
+<p><a id="license" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;">📜 License</summary>
+<ul>
+<li>This project uses the <strong>AGPL-3.0 license</strong>. Any derivative works based on this project must:
+<ul>
+<li>Disclose the complete source code;</li>
+<li>Include the original copyright notice;</li>
+<li>Commercial use requires contacting the author for special authorization.</li>
+</ul>
+</li>
+</ul>
+<p><a id="contact-us" href=""></a></p>
+<summary style="font-size:1.5em;font-weight:bold;">🤝 Contact Us</summary>
+<ul>
+<li>For any questions or suggestions, please submit an <a href="https://github.com/Milo-L/StomataQuant/issues">issue</a> or contact <a href="https://github.com/Milo-L/">Menglong Liu</a> (<a href="mailto:milo.liu@stu.pku.edu.cn">milo.liu@stu.pku.edu.cn</a>)  or <a href="https://www.researchgate.net/profile/Yin-Wang-78">Dr. Yin Wang</a> (<a href="mailto:wangyinpku@pku.edu.cn">wangyinpku@pku.edu.cn</a>).</li>
+</ul>
+<hr>
+<p align="center">
+<img src="readme_medias\8_bottom.jpg" alt="8_bottom" width="100%">
+</p>
+
+      </div>
+      
+      
+    
+    
+    
+    
+    
+    
+  
+    </body></html>

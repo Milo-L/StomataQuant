@@ -6,6 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 from collections import defaultdict
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QVBoxLayout
 from PyQt5.QtCore import QPointF
+import csv  # 添加 csv 导入
 import glob
 from AllDialogs import BatchProcessingDialog, BatchProgressDialog
 from InferenceThread import YOLOSegInferenceThread, HeatMapGenerationThread,PolygonProcessThread
@@ -828,7 +829,127 @@ class BatchProcessor:
         
         QMessageBox.information(self.main_window, "Batch Processing Complete", summary)
 
-# 在现有代码的最后添加
+# BatchFeatureExporter 类
+class BatchFeatureExporter:
+    def __init__(self, main_window):
+        """
+        初始化批量特征导出器
+        Args:
+            main_window: UIMainWindow的实例
+        """
+        self.main_window = main_window
+
+    def export_features(self, shape_type):
+        """
+        导出指定类型形状的特征
+        Args:
+            shape_type: 形状类型 ('polygon', 'rotated_rectangle', 'rectangle', 'point')
+        """
+        tab_count = self.main_window.tabWidget.count()
+        if tab_count == 0:
+            QtWidgets.QMessageBox.warning(self.main_window, "Export Features", "No image tabs open.")
+            return
+
+        # 获取保存路径
+        default_filename = f"Batch_Export_{shape_type}_Features.csv"
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self.main_window, 
+            f"Export {shape_type} Features", 
+            default_filename, 
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        # 创建进度对话框
+        progress = QtWidgets.QProgressDialog(f"Exporting {shape_type} features...", "Cancel", 0, tab_count, self.main_window)
+        progress.setWindowTitle("Batch Export Progress")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        all_data = []
+        fieldnames = set()
+        base_fields = ['File Path', 'File Name']
+
+        try:
+            for i in range(tab_count):
+                if progress.wasCanceled():
+                    break
+                
+                progress.setValue(i)
+                tab = self.main_window.tabWidget.widget(i)
+                
+                # 获取文件信息
+                file_path_img = tab.property("file_path")
+                file_name = os.path.basename(file_path_img) if file_path_img else f"Tab {i+1}"
+                
+                # 获取图形视图和画布
+                graphics_view = tab.property("graphics_view")
+                if not graphics_view or not graphics_view.canvas:
+                    continue
+                
+                canvas = graphics_view.canvas
+                # 筛选特定类型的形状
+                shapes = [s for s in canvas.shapes if s.shape_type == shape_type]
+                
+                if not shapes:
+                    continue
+
+                # 确定比例尺信息
+                scale_info = None
+                if hasattr(self.main_window, 'global_scale_info') and self.main_window.global_scale_info:
+                    scale_info = self.main_window.global_scale_info
+                elif hasattr(graphics_view, 'scale_info'):
+                    scale_info = graphics_view.scale_info
+                
+                # 提取特征
+                for shape in shapes:
+                    # 确保特征已计算
+                    if not shape.feature_results:
+                        if shape_type == 'polygon':
+                            shape.feature_extraction_polygon(scale_info)
+                        elif shape_type == 'rotated_rectangle':
+                            shape.feature_extraction_rotated_rectangle(scale_info)
+                        elif shape_type == 'rectangle':
+                            shape.feature_extraction_rectangle(scale_info)
+                        elif shape_type == 'point':
+                            shape.feature_extraction_point(scale_info)
+                    
+                    # 收集数据
+                    if shape.feature_results:
+                        row_data = {
+                            'File Path': file_path_img,
+                            'File Name': file_name
+                        }
+                        # 将特征结果合并到行数据中
+                        row_data.update(shape.feature_results)
+                        all_data.append(row_data)
+                        # 收集所有出现的字段名
+                        fieldnames.update(shape.feature_results.keys())
+
+            progress.setValue(tab_count)
+
+            if not all_data:
+                QtWidgets.QMessageBox.information(self.main_window, "Export Features", f"No {shape_type} shapes found to export.")
+                return
+
+            # 排序字段名：基础字段在前，其他字段按字母顺序排列
+            sorted_fieldnames = base_fields + [f for f in sorted(list(fieldnames)) if f not in base_fields]
+
+            # 写入CSV
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=sorted_fieldnames)
+                writer.writeheader()
+                writer.writerows(all_data)
+
+            QtWidgets.QMessageBox.information(self.main_window, "Export Successful", f"Successfully exported features to:\n{file_path}")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self.main_window, "Export Error", f"An error occurred: {str(e)}")
+        finally:
+            progress.close()
 
 class BatchExporter:
     def __init__(self, main_window):

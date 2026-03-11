@@ -5,6 +5,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QGraphicsItem
 import numpy as np
 import cv2
+from scipy.ndimage import distance_transform_edt
 
 class Shape(QGraphicsItem):
     color_map = {
@@ -161,23 +162,83 @@ class Shape(QGraphicsItem):
 # 将所有形状显示为piont
 # Show all shapes as piont
 ######################################################################
+    # def get_universe_central_point(self):
+    #     """
+    #     计算形状的宇宙中心点，确保中心点位于形状内部。
+    #     """
+    #     # 获取初始中心点
+    #     center = self.get_center()
+
+    #     # 对矩形进行特殊处理
+    #     if self.shape_type == "rectangle" and len(self.pointslist) == 2:
+    #         # 直接使用 QRectF 判断中心点是否在矩形内
+    #         rect = QtCore.QRectF(self.pointslist[0], self.pointslist[1])
+    #         if not rect.contains(center):
+    #             # 如果中心点不在矩形内(这种情况理论上不应该发生，但以防万一)
+    #             # 计算矩形的真实中心
+    #             center = QPointF(rect.center())
+    #     else:
+    #         # 对多边形和旋转矩形使用原有的路径检查逻辑
+    #         path = QtGui.QPainterPath()
+    #         if len(self.pointslist) > 0:
+    #             path.moveTo(self.pointslist[0])
+    #             for pt in self.pointslist[1:]:
+    #                 path.lineTo(pt)
+    #             path.closeSubpath()
+
+    #         if not path.contains(center):
+    #             # 寻找形状内部的点
+    #             inside_point = None
+    #             min_distance = float('inf')
+
+    #             # 对每个顶点
+    #             for vertex in self.pointslist:
+    #                 # 在中心点和顶点之间进行二分查找
+    #                 start = 0.0
+    #                 end = 1.0
+    #                 for _ in range(10):  # 10次二分迭代
+    #                     mid = (start + end) / 2.0
+    #                     test_point = QPointF(
+    #                         center.x() + (vertex.x() - center.x()) * mid,
+    #                         center.y() + (vertex.y() - center.y()) * mid
+    #                     )
+    #                     if path.contains(test_point):
+    #                         # 计算到原始中心点的距离
+    #                         dx = test_point.x() - center.x()
+    #                         dy = test_point.y() - center.y()
+    #                         distance = dx * dx + dy * dy
+
+    #                         if distance < min_distance:
+    #                             min_distance = distance
+    #                             inside_point = test_point
+    #                         end = mid
+    #                     else:
+    #                         start = mid
+
+    #             if inside_point:
+    #                 center = inside_point
+    #             else:
+    #                 # 如果没找到内部点，退回到第一个顶点
+    #                 center = self.pointslist[0]
+
+    #     return center
+
+
     def get_universe_central_point(self):
         """
-        计算形状的宇宙中心点，确保中心点位于形状内部。
+        计算形状的宇宙中心点,确保中心点位于形状内部。
+        如果几何中心不在形状内部,则使用最大内接圆的圆心。
         """
         # 获取初始中心点
         center = self.get_center()
 
         # 对矩形进行特殊处理
         if self.shape_type == "rectangle" and len(self.pointslist) == 2:
-            # 直接使用 QRectF 判断中心点是否在矩形内
             rect = QtCore.QRectF(self.pointslist[0], self.pointslist[1])
             if not rect.contains(center):
-                # 如果中心点不在矩形内(这种情况理论上不应该发生，但以防万一)
-                # 计算矩形的真实中心
                 center = QPointF(rect.center())
         else:
-            # 对多边形和旋转矩形使用原有的路径检查逻辑
+            # 对多边形和旋转矩形使用路径检查
             path = QtGui.QPainterPath()
             if len(self.pointslist) > 0:
                 path.moveTo(self.pointslist[0])
@@ -186,42 +247,61 @@ class Shape(QGraphicsItem):
                 path.closeSubpath()
 
             if not path.contains(center):
-                # 寻找形状内部的点
-                inside_point = None
-                min_distance = float('inf')
-
-                # 对每个顶点
-                for vertex in self.pointslist:
-                    # 在中心点和顶点之间进行二分查找
-                    start = 0.0
-                    end = 1.0
-                    for _ in range(10):  # 10次二分迭代
-                        mid = (start + end) / 2.0
-                        test_point = QPointF(
-                            center.x() + (vertex.x() - center.x()) * mid,
-                            center.y() + (vertex.y() - center.y()) * mid
-                        )
-                        if path.contains(test_point):
-                            # 计算到原始中心点的距离
-                            dx = test_point.x() - center.x()
-                            dy = test_point.y() - center.y()
-                            distance = dx * dx + dy * dy
-
-                            if distance < min_distance:
-                                min_distance = distance
-                                inside_point = test_point
-                            end = mid
-                        else:
-                            start = mid
-
-                if inside_point:
-                    center = inside_point
-                else:
-                    # 如果没找到内部点，退回到第一个顶点
-                    center = self.pointslist[0]
+                # 使用最大内接圆方法查找中心点
+                center = self._find_largest_inscribed_circle_center(path)
 
         return center
 
+    def _find_largest_inscribed_circle_center(self, path):
+        """
+        使用距离变换找到形状的最大内接圆圆心
+        """
+        # 获取边界框
+        bbox = path.boundingRect()
+        if bbox.width() == 0 or bbox.height() == 0:
+            return self.pointslist[0] if self.pointslist else QPointF(0, 0)
+        
+        # 创建栅格化的二值图像
+        # 使用更高的分辨率以提高精度
+        resolution = 200
+        width = int(bbox.width()) + 1
+        height = int(bbox.height()) + 1
+        scale_x = resolution / max(width, 1)
+        scale_y = resolution / max(height, 1)
+        scale = min(scale_x, scale_y)
+        
+        grid_width = int(width * scale) + 2
+        grid_height = int(height * scale) + 2
+        
+        # 创建二值图像
+        binary_image = np.zeros((grid_height, grid_width), dtype=np.uint8)
+        
+        # 填充形状内部
+        for y in range(grid_height):
+            for x in range(grid_width):
+                # 将栅格坐标转换回实际坐标
+                real_x = bbox.left() + x / scale
+                real_y = bbox.top() + y / scale
+                point = QPointF(real_x, real_y)
+                
+                if path.contains(point):
+                    binary_image[y, x] = 1
+        
+        # 如果没有内部点,返回第一个顶点
+        if not binary_image.any():
+            return self.pointslist[0] if self.pointslist else QPointF(0, 0)
+        
+        # 计算距离变换
+        distance_map = distance_transform_edt(binary_image)
+        
+        # 找到距离最大的点(最大内接圆的圆心)
+        max_dist_idx = np.unravel_index(np.argmax(distance_map), distance_map.shape)
+        
+        # 转换回实际坐标
+        center_x = bbox.left() + max_dist_idx[1] / scale
+        center_y = bbox.top() + max_dist_idx[0] / scale
+        
+        return QPointF(center_x, center_y)
     def convert_to_point_shape(self):
         if self.shape_type == "point":
             return
