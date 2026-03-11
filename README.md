@@ -54,8 +54,8 @@
 
         + **All Models** | [Download](https://disk.pku.edu.cn/link/AAC44553ECE969443AA3FB5471613AE9EC) | Extract Code: `0Qr2`  
 
-            + **Stomata Detection** | [Download]( https://disk.pku.edu.cn/link/AA2BA08969302A4DF18131895C5FDC2F3A) | Extract Code: `N2D2`  
-            + **Stomata and Pores Segmentation** | [Download](https://disk.pku.edu.cn/link/AA7C4E6A7F2FD84189A80655F6E6D1F25D) | Extract Code: `J63U`  
+            + **Stomata Detection** | [Download]( https://disk.pku.edu.cn/link/AA0DDCFAC35F5C44428E03B06665C86906) | Extract Code: `N2D2`  
+            + **Stomata and Pores Segmentation** | [Download](https://disk.pku.edu.cn/link/AA2BA08969302A4DF18131895C5FDC2F3A)| Extract Code: `J63U`  
             + **Stomata and Pavement Cells Segmentation** | [Download](https://disk.pku.edu.cn/link/AA4F0255457A324A50834D4024CB124688) | Extract Code: `3v3S`
 
 
