@@ -491,18 +491,22 @@ All datasets used for training and validating the **StomataQuant** models are ho
 
 If you use **StomataQuant** in your research, please cite the following paper:
 
-> Liu, M., Ren, Z., Wei, J., Zhang, H., Li, Y., Wang, G., Xie, P., & Wang, Y.  
-**Integrating automated detection and segmentation for quantitative analysis of stomata and pavement cells using StomataQuant.**  *Journal of Plant Ecology.* (Accepted)
+> Liu, M.-L., Ren, Z.-R., Wei, J., Zhang, H., Li, Y.-K., Wang, G.-Y., Xie, P., & Wang, Y. (2026).  
+**Integrating automated detection and segmentation for quantitative analysis of stomata and pavement cells using StomataQuant.** *Journal of Plant Ecology*, rtag063.  
+[https://doi.org/10.1093/jpe/rtag063](https://doi.org/10.1093/jpe/rtag063)
+
 <details>
 <summary style="padding-left: 1em; cursor: pointer;"><strong>Click to view BibTeX</strong></summary>
 
 ```bibtex
-@article{StomataQuant,
+@article{StomataQuant2026,
   title = {Integrating Automated Detection and Segmentation for Quantitative Analysis of Stomata and Pavement Cells using StomataQuant},
   author = {Liu, Meng-Long and Ren, Zi-Rong and Wei, Jian and Zhang, He and Li, Yu-Kang and Wang, Gu-Yan and Xie, Peng and Wang, Yin},
   journal = {Journal of Plant Ecology},
   year = {2026},
-  note = {Accepted}
+  pages = {rtag063},
+  doi = {10.1093/jpe/rtag063},
+  url = {[https://doi.org/10.1093/jpe/rtag063](https://doi.org/10.1093/jpe/rtag063)}
 }
 ```
 </details>
