@@ -1,19 +1,60 @@
 import os
+import sys
+from macos_paths import macos_output_dir
+import io
 import json
+import math
 from PyQt5.QtCore import QEventLoop, QTimer, Qt
 from PyQt5.QtGui import QPixmap, QImageReader
-from PyQt5 import QtCore, QtWidgets
-from collections import defaultdict
+from PyQt5 import QtCore, QtWidgets, sip
+from collections import defaultdict, Counter
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QVBoxLayout
 from PyQt5.QtCore import QPointF
 import csv  # 添加 csv 导入
 import glob
 from AllDialogs import BatchProcessingDialog, BatchProgressDialog
-from InferenceThread import YOLOSegInferenceThread, HeatMapGenerationThread,PolygonProcessThread
+from InferenceThread import YOLOSegInferenceThread, HeatMapGenerationThread,PolygonProcessThread, BatchInferenceSession
 from shape import Shape
+from measurements import resolve_scale, ensure_features, refresh_shapes
+from task_support import task_manager, wait_for_worker, OperationCancelled, check_cancelled
+from inference_support import decode_predictions, shapes_from_predictions, save_polygon_audit
 from ImageGraphicsView import ImageGraphicsView
 from canvas import process_polygon_data
+from point_annotations import batch_points, batch_import_points, require_target
+from batch_ui import annotation_batch, checkpoint, exact_annotation_candidates, image_path_key, mark_batch_fit
+from safe_io import source_suffix, write_unique_text_atomic, write_text_atomic
+from annotation_io import validate_polygon_export, validate_rectangle_export
+from geometry import minimum_rectangle_size
 import traceback
+import ctypes
+from functools import cmp_to_key
+
+
+class InvalidAnnotationData(ValueError):
+    pass
+
+
+# Windows 文件资源管理器风格的自然排序
+if os.name == "nt":
+    _logical_compare = ctypes.windll.shlwapi.StrCmpLogicalW
+    _logical_compare.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p
+    ]
+    _logical_compare.restype = ctypes.c_int
+
+
+def compare_filenames(path_a, path_b):
+    name_a = os.path.basename(path_a)
+    name_b = os.path.basename(path_b)
+
+    if os.name == "nt":
+        return _logical_compare(name_a, name_b)
+
+    # 非 Windows 系统备用排序
+    a = name_a.casefold()
+    b = name_b.casefold()
+    return (a > b) - (a < b)
 
 class BatchProcessor:
     def __init__(self, main_window):
@@ -23,208 +64,156 @@ class BatchProcessor:
             main_window: UIMainWindow的实例，提供对主窗口功能的访问
         """
         self.main_window = main_window
+        self._ai_session = None
+        self.rejected_predictions = 0
+        self._ai_model = getattr(main_window, 'model', None)
         
 # 在 BatchProcessor 类的 process 方法中添加新选项的处理
 
     def process(self):
-        """
-        执行批处理操作
-        """
-        # 获取所有打开的标签页
-        tab_count = self.main_window.tabWidget.count()
-        if tab_count == 0:
-            QMessageBox.warning(self.main_window, "Batch Processing", "No image tabs open. Please open some images first.")
+        if getattr(self.main_window, '_batch_running', False):
             return
-        
-        # 显示批处理选项对话框
+        tabs = [self.main_window.tabWidget.widget(i) for i in range(self.main_window.tabWidget.count())]
+        if len(tabs) < 2:
+            QMessageBox.warning(self.main_window, 'Batch Processing', 'Batch Processing requires at least two open images/tabs.')
+            return
         dialog = BatchProcessingDialog(self.main_window)
         if dialog.exec_() != QDialog.Accepted:
             return
-        
-        options = dialog.get_options()
-        # 保存选项供其他方法使用
-        self.batch_options = options
-        
-
-        # 修改后的代码 - 无论设置值如何都执行
-        has_group_id_operation = "group_id_display" in options  # 只要有这个选项就执行
-        has_class_visibility_operation = "class_visibility" in options  # 只要有这个选项就执行
-        
-        # 如果没有选择任何操作，则返回
-        if not any([
-            options["ai"], 
-            options["filter"], 
-            options["show_points"], 
-            options["mer"], 
-            options["feature_extraction"], 
-            options["heatmap"],
-            has_group_id_operation,  # 添加group_id显示检查
-            has_class_visibility_operation  # 添加class_visibility检查
-        ]):
-            QMessageBox.information(self.main_window, "Batch Processing", "No operations selected.")
+        options = self.batch_options = dialog.get_options()
+        self.batch_heatmap_settings = options.get('heatmap_settings', {})
+        names = [name for name in ('ai','filter','group_id_display','class_visibility','show_points','mer','heatmap')
+                 if (name in options if name in ('group_id_display','class_visibility') else options.get(name))]
+        if not names:
             return
-        
-        # 保存热图设置以供后续使用
-        if options["heatmap"] and "heatmap_settings" in options:
-            self.batch_heatmap_settings = options["heatmap_settings"]
-        
-        # 计算总操作数
-        operations_per_tab = sum([
-            1 if options["ai"] else 0,
-            1 if options["filter"] else 0,
-            1 if options["show_points"] else 0,
-            1 if options["mer"] else 0,
-            1 if options["feature_extraction"] else 0,
-            1 if options["heatmap"] else 0,
-            1 if has_group_id_operation else 0,  # 添加group_id显示为独立操作
-            1 if has_class_visibility_operation else 0  # 添加class_visibility为独立操作
-        ])
-        
-        total_operations = tab_count * operations_per_tab
-        
-        if total_operations == 0:
-            QMessageBox.information(self.main_window, "Batch Processing", "No operations to perform.")
-            return
-        
-        # 创建进度对话框
-        progress_dialog = BatchProgressDialog(self.main_window)
-        progress_dialog.set_max_operations(total_operations)
-        progress_dialog.show()
-        
-        # 保存当前标签页索引
-        current_tab_index = self.main_window.tabWidget.currentIndex()
-        
-        # 用于跟踪成功和失败的操作
-        results = {
-            "success": 0,
-            "failed": 0,
-            "skipped": 0,
-            "operations": {
-                "ai": {"success": 0, "failed": 0},
-                "filter": {"success": 0, "failed": 0},
-                "show_points": {"success": 0, "failed": 0},
-                "mer": {"success": 0, "failed": 0},
-                "feature_extraction": {"success": 0, "failed": 0},
-                "heatmap": {"success": 0, "failed": 0}
-            }
-        }
-        
-        # 初始化操作计数器
-        operation_count = 0
-        
+        results = {key: 0 for key in ('success','failed','skipped','canceled')}
+        results.update(operations={name: {key: 0 for key in ('success','failed','skipped','canceled')} for name in names}, errors=[])
+        progress = BatchProgressDialog(self.main_window)
+        progress.set_max_operations(len(tabs)*len(names)); progress.show()
+        original_tab = self.main_window.tabWidget.currentWidget()
+        self.main_window._batch_running = True
+        previous_defer = getattr(self.main_window, '_defer_batch_refresh', False)
+        self.main_window._defer_batch_refresh = True
+        if hasattr(self.main_window, '_measurement_timer'):
+            self.main_window._measurement_timer.stop()
+        completed = 0
+        self._ai_session = None
+        self._ai_model = getattr(self.main_window, 'model', None)
+        self.rejected_predictions = 0
         try:
-            for tab_index in range(tab_count):
-                # 切换到当前标签页
-                self.main_window.tabWidget.setCurrentIndex(tab_index)
-                QApplication.processEvents()  # 确保UI更新
-                
-                tab = self.main_window.tabWidget.widget(tab_index)
-                file_path = tab.property("file_path")
-                progress_dialog.set_tab_info(tab_index + 1, tab_count)
-                
-                file_name = os.path.basename(file_path) if file_path else "Unknown"
-                progress_dialog.update_file(file_name)
-                
-                # 获取当前标签页的 GraphicsView 和 Canvas
-                graphics_view = tab.property("graphics_view")
-                
-                if not graphics_view or not graphics_view.canvas:
-                    progress_dialog.update_status(f"Skipping tab {tab_index + 1}: Canvas not initialized")
-                    results["skipped"] += 1
-                    continue
-                
-                # 执行AI推理
-                if options["ai"]:
-                    self._process_ai_operation(tab_index, file_path, graphics_view, progress_dialog, results)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-                
-                # 执行过滤操作
-                if options["filter"]:
-                    self._process_filter_operation(tab_index, graphics_view, options["filter"], progress_dialog, results)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-
-                if has_group_id_operation:
-                    self._process_group_id_display(tab_index, graphics_view, options["group_id_display"], progress_dialog)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-                
-                # 添加独立的类别可见性处理
-                if has_class_visibility_operation:
-                    self._process_class_visibility(tab_index, graphics_view, options["class_visibility"], progress_dialog)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-
-                # 执行显示点操作
-                if options["show_points"]:
-                    self._process_show_points_operation(tab_index, graphics_view, progress_dialog, results)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-                
-                # 执行MER操作
-                if options["mer"]:
-                    self._process_mer_operation(tab_index, graphics_view, progress_dialog, results)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-                
-                # 执行特征提取
-                if options["feature_extraction"]:
-                    self._process_feature_extraction(tab_index, graphics_view, progress_dialog, results)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-                
-                # 执行热图生成
-                if options["heatmap"]:
-                    self._process_heatmap_operation(tab_index, graphics_view, progress_dialog, results)
-                    operation_count += 1
-                    progress_dialog.update_overall_progress(operation_count)
-                
-                # 检查用户是否取消
-                if progress_dialog.canceled:
-                    progress_dialog.update_status("Processing canceled by user")
+            if 'ai' in names and self._ai_model:
+                model_path = getattr(self._ai_model, '_stomataquant_source_path', None)
+                if model_path:
+                    self._ai_session = BatchInferenceSession(model_path)
+                    self._ai_session.start()
+            for number, tab in enumerate(tabs):
+                if progress.canceled or getattr(self.main_window, '_closing_requested', False):
+                    results['canceled'] += len(tabs)-number
+                    for name in names:
+                        results['operations'][name]['canceled'] += len(tabs)-number
                     break
-                
-                # 完成了一个标签页的所有操作
-                results["success"] += 1
-        
-        except Exception as e:
-            QMessageBox.critical(self.main_window, "Error", f"An unexpected error occurred during batch processing: {str(e)}")
-        
-        # 在finally块中，修改现有循环
+                index = -1 if sip.isdeleted(tab) else self.main_window.tabWidget.indexOf(tab)
+                if index < 0:
+                    results['skipped'] += 1
+                    for name in names: results['operations'][name]['skipped'] += 1
+                    continue
+                view = tab.property('graphics_view')
+                if not view or not view.canvas:
+                    results['skipped'] += 1
+                    for name in names: results['operations'][name]['skipped'] += 1
+                    continue
+                progress.set_tab_info(number+1,len(tabs))
+                path = tab.property('file_path')
+                progress.update_file(os.path.basename(path or 'Unknown'))
+                outcomes = []
+                for name in names:
+                    QApplication.processEvents()
+                    if progress.canceled or getattr(self.main_window, '_closing_requested', False):
+                        progress.canceled = True
+                        results['operations'][name]['canceled'] += 1
+                        outcomes.append('canceled')
+                        continue
+                    index = -1 if sip.isdeleted(tab) else self.main_window.tabWidget.indexOf(tab)
+                    if index < 0 or sip.isdeleted(view) or not view.canvas:
+                        results['operations'][name]['skipped'] += 1
+                        outcomes.append('skipped')
+                        continue
+                    if name == 'ai':
+                        call = lambda: self._process_ai_operation(index,path,view,progress,results)
+                    elif name == 'filter':
+                        call = lambda: self._process_filter_operation(index,view,options[name],progress,results)
+                    elif name == 'group_id_display':
+                        call = lambda: self._process_group_id_display(index,view,options[name],progress)
+                    elif name == 'class_visibility':
+                        call = lambda: self._process_class_visibility(index,view,options[name],progress)
+                    else:
+                        methods = {'show_points':self._process_show_points_operation, 'mer':self._process_mer_operation,
+                                   'heatmap':self._process_heatmap_operation}
+                        call = lambda: methods[name](index,view,progress,results)
+                    outcomes.append(self._run_operation(name,call,progress,results,number))
+                    completed += 1; progress.update_overall_progress(completed)
+                state = self._tab_outcome(outcomes)
+                results[state] += 1
+                if not sip.isdeleted(view) and view.canvas:
+                    view.canvas.shapesChanged.emit()
+                    view.canvas.update()
         finally:
-            # 添加循环，强制更新所有处理过的标签页
-            for tab_index in range(tab_count):
-                try:
-                    self.main_window.tabWidget.setCurrentIndex(tab_index)
-                    QApplication.processEvents()  # 确保UI更新
-                    graphics_view = self.main_window.get_current_graphics_view()
-                    graphics_view.fit_to_view_custom()
-     
-                except Exception as e:
-                    print(f"Error updating tab {tab_index}: {str(e)}")
-                    
-            # 恢复到原来的标签页
-            self.main_window.tabWidget.setCurrentIndex(current_tab_index)
-            graphics_view = self.main_window.get_current_graphics_view()
-            if graphics_view and graphics_view.canvas:
-                graphics_view.canvas.set_mode('edit')
-                self.main_window.actionEditShapes.setChecked(True)
-                
-                # 使用UIMainWindow的完整更新方法
-                self.main_window.update_shapes_and_label_list()
-                self.main_window.labeldockinstance.populate(graphics_view.canvas.shapes, Shape.get_color_by_classnum)
-                self.main_window.shapedockinstance.populate(graphics_view.canvas.shapes)
-                self.main_window.get_current_graphics_view().canvas.update()
-                self.main_window.edit_shapes()  # 这会处理编辑模式下的各种按钮状态
-            
-            # 关闭进度对话框
-            # 在处理完成后允许关闭
-            progress_dialog.allow_close()
-            progress_dialog.close()
-            
-            # 显示结果摘要
-            self._display_results_summary(tab_count, results, options)
+            if self._ai_session is not None:
+                self._ai_session.close()
+                self._ai_session = None
+            self.main_window._batch_running = False
+            if original_tab is not None and not sip.isdeleted(original_tab) and self.main_window.tabWidget.indexOf(original_tab) >= 0:
+                self.main_window.tabWidget.setCurrentWidget(original_tab)
+            self.main_window._defer_batch_refresh = previous_defer
+            if not previous_defer:
+                self.main_window.measurement_controller.refresh_tabs()
+                index = self.main_window.tabWidget.currentIndex()
+                self.main_window.update_list_on_tab_changed(index)
+                self.main_window.update_zoom_on_tab_change(index)
+                self.main_window.update_undo_button()
+                self.main_window.update_actions_inToolBar()
+            mark_batch_fit(self.main_window)
+            progress.allow_close(); progress.close(); progress.deleteLater()
+            self.last_results = results
+            self.main_window._last_batch_results = results
+            if not getattr(self.main_window, '_closing_requested', False):
+                self._display_results_summary(len(tabs),results,options)
+
+    def _notify_canvas(self, canvas):
+        # process() emits once per target after all operations; standalone calls still notify.
+        if not getattr(self.main_window, '_defer_batch_refresh', False):
+            canvas.update()
+            canvas.shapesChanged.emit()
+
+    @staticmethod
+    def _tab_outcome(outcomes):
+        for state in ('canceled','failed','success'):
+            if state in outcomes:
+                return state
+        return 'skipped'
+
+    def _run_operation(self, name, call, progress, results, tab_number):
+        counts = results['operations'][name]
+        before = dict(counts)
+        reported = None
+        try:
+            reported = call()
+        except OperationCancelled:
+            counts['canceled'] = counts.get('canceled',0)+1
+        except Exception as error:
+            counts['failed'] += 1
+            progress.update_status(str(error))
+        changes = [state for state in ('canceled','failed','success','skipped') if counts.get(state,0)>before.get(state,0)]
+        if not changes:
+            state = reported if isinstance(reported, str) and reported in counts else 'failed'
+            counts[state] += 1
+            changes = [state]
+            if state == 'failed':
+                progress.update_status('Operation did not report a successful result.')
+        outcome = self._tab_outcome(changes)
+        if outcome == 'failed':
+            results['errors'].append({'tab':tab_number+1,'operation':name,'error':getattr(progress,'last_status','Operation failed')})
+        return outcome
 
     def _process_class_visibility(self, tab_index, graphics_view, class_visibility, progress_dialog):
         """处理类别可见性设置"""
@@ -237,6 +226,7 @@ class BatchProcessor:
             
             # 应用类别可见性设置
             visibility_changed = False
+            last_percent = -1
             for i, shape in enumerate(shapes):
                 if hasattr(shape, 'classnum') and shape.classnum in class_visibility:
                     old_visibility = shape.visible
@@ -246,20 +236,23 @@ class BatchProcessor:
                         shape._dirty = True  # 标记为脏以确保重绘
                 
                 # 更新进度
-                progress_dialog.update_operation_progress(int((i+1) * 100 / len(shapes)))
+                percent = int((i+1) * 100 / len(shapes))
+                if percent != last_percent:
+                    progress_dialog.update_operation_progress(percent)
+                    last_percent = percent
             
             if visibility_changed:
                 # 更新画布
-                canvas.update()
-                canvas.shapesChanged.emit()
+                self._notify_canvas(canvas)
                 
                 # 记录操作状态到进度对话框
                 progress_dialog.update_status(f"Tab {tab_index + 1}: Applied class visibility settings")
             
             progress_dialog.update_operation_progress(100)
-            
+            return 'success' if any(getattr(s, 'classnum', None) in class_visibility for s in shapes) else 'skipped'
         except Exception as e:
             progress_dialog.update_status(f"Error setting class visibility in tab {tab_index + 1}: {str(e)}")
+            raise
     # 添加Group ID显示处理方法
     def _process_group_id_display(self, tab_index, graphics_view, display_option, progress_dialog):
         """处理Group ID显示设置"""
@@ -285,14 +278,14 @@ class BatchProcessor:
                 shape._dirty = True  # 确保每个形状都被标记为脏
             
             # 立即更新画布以显示变化
-            canvas.update()
-            canvas.shapesChanged.emit()
+            self._notify_canvas(canvas)
             
             # 记录操作状态到进度对话框
             progress_dialog.update_status(f"Tab {tab_index + 1}: Group ID display set to '{display_option}'")
-            
+            return 'success' if shapes else 'skipped'
         except Exception as e:
             progress_dialog.update_status(f"Error setting group ID display in tab {tab_index + 1}: {str(e)}")
+            raise
     # 添加显示点操作处理方法
     def _process_show_points_operation(self, tab_index, graphics_view, progress_dialog, results):
         """处理转换为点的操作"""
@@ -318,8 +311,7 @@ class BatchProcessor:
                 
                 if shapes_changed:
                     # 更新画布
-                    canvas.update()
-                    canvas.shapesChanged.emit()
+                    self._notify_canvas(canvas)
                     
                 progress_dialog.update_operation_progress(100)
                 results["operations"]["show_points"]["success"] += 1
@@ -332,76 +324,30 @@ class BatchProcessor:
             results["operations"]["show_points"]["failed"] += 1
         
     def _process_ai_operation(self, tab_index, file_path, graphics_view, progress_dialog, results):
-        """处理AI推理操作"""
+        progress_dialog.update_operation('Running YOLO Inference')
+        if self._ai_model is not getattr(self.main_window, 'model', None):
+            if self._ai_session is not None:
+                self._ai_session.close()
+                self._ai_session = None
+            raise ValueError('The model changed during Batch; start a new Batch with the selected model.')
+        if not getattr(self.main_window,'model',None):
+            raise ValueError('No model loaded. Please load a model before AI inference.')
+        settings = dict(self.main_window.inference_settings or {})
+        manager = task_manager(self.main_window)
+        task = manager.begin(self.main_window.tabWidget.widget(tab_index),'inference',settings=settings)
         try:
-            progress_dialog.update_operation("Running YOLO Inference")
-            progress_dialog.update_operation_progress(0)
-            
-            # 检查是否有模型
-            if not hasattr(self.main_window, 'model') or not self.main_window.model:
-                progress_dialog.update_status("Error: No model loaded")
-                results["operations"]["ai"]["failed"] += 1
-                return
-            
-            # 准备推理参数
-            inference_settings = self.main_window.inference_settings.copy() if hasattr(self.main_window, 'inference_settings') and self.main_window.inference_settings else {
-                "conf": 0.5,
-                "iou": 0.7,
-                "device": "cpu",
-                "save_path": os.path.join(os.getcwd(), "Inference_OutPut"),
-                "imgsz": 1024,
-                "max_det": 500
-            }
-            
-            # 创建批处理版本的推理线程
-            batch_thread = YOLOSegInferenceThread(self.main_window.model, file_path, inference_settings, self.main_window)
-            
-            # 创建一个事件循环来等待线程完成
-            loop = QEventLoop()
-            
-            # 保存引用，让批处理结束时可以使用
-            batch_results = {"results": None, "error": None}
-            
-            def on_batch_inference_finished(results, file_path, error):
-                batch_results["results"] = results
-                batch_results["error"] = error
-                loop.quit()
-            
-            batch_thread.inferenceFinished.connect(on_batch_inference_finished)
-            
-            # 启动线程
-            batch_thread.start()
-            
-            # 进度更新
-            progress_timer = QTimer()
-            progress_value = 0
-            
-            def update_progress():
-                nonlocal progress_value
-                progress_value = min(99, progress_value + 5)  # 模拟进度，最多到99%
-                progress_dialog.update_operation_progress(progress_value)
-                
-            progress_timer.timeout.connect(update_progress)
-            progress_timer.start(500)  # 每0.5秒更新一次
-            
-            # 等待线程完成
-            loop.exec_()
-            progress_timer.stop()
-            
-            # 检查是否有错误
-            if batch_results["error"]:
-                progress_dialog.update_status(f"Error in tab {tab_index + 1}: {batch_results['error']}")
-                results["operations"]["ai"]["failed"] += 1
-                
-            else:
-                # 手动处理结果
-                self._process_yolo_results(batch_results["results"], file_path, graphics_view.canvas)
-                progress_dialog.update_operation_progress(100)
-                results["operations"]["ai"]["success"] += 1
-        
-        except Exception as e:
-            progress_dialog.update_status(f"Error in tab {tab_index + 1} AI operation: {str(e)}")
-            results["operations"]["ai"]["failed"] += 1
+            worker = YOLOSegInferenceThread(self.main_window.model,file_path,settings,self.main_window,
+                                            batch_session=self._ai_session)
+            predictions, path, error = wait_for_worker(manager,task,worker,worker.inferenceFinished,
+                                                       lambda: progress_dialog.canceled)
+            if error:
+                raise error if isinstance(error,Exception) else RuntimeError(error)
+            shapes = self._process_yolo_results(predictions,path,graphics_view.canvas,task,progress_dialog)
+            state = 'success' if shapes else 'skipped'
+            results['operations']['ai'][state] = results['operations']['ai'].get(state,0)+1
+            progress_dialog.update_operation_progress(100)
+        finally:
+            manager.finish(task)
     
     def _process_filter_operation(self, tab_index, graphics_view, filter_type, progress_dialog, results):
         """处理过滤操作"""
@@ -411,6 +357,8 @@ class BatchProcessor:
                 progress_dialog.update_operation_progress(0)
                 
                 canvas = graphics_view.canvas
+                if not canvas.shapes:
+                    return 'skipped'
                 image_size = canvas.image_size
                 image_width = image_size.width()
                 image_height = image_size.height()
@@ -453,381 +401,121 @@ class BatchProcessor:
 # 修改 _process_mer_operation 方法
 
     def _process_mer_operation(self, tab_index, graphics_view, progress_dialog, results):
-        """处理MER操作"""
-        try:
-            progress_dialog.update_operation("Calculating Minimum Enclosing Rectangle")
-            progress_dialog.update_operation_progress(0)
-            
-            canvas = graphics_view.canvas
-            polygon_shapes = [s for s in canvas.shapes if s.visible and s.shape_type == "polygon"]
-            
-            if polygon_shapes:
-                # 保存初始状态用于撤销
-                canvas.save_state()
-                
-                # 存储临时选中状态
-                temp_selected = canvas.selected_shape.copy() if canvas.selected_shape else []
-                canvas.selected_shape = []
-                
-                # 添加MER形状
-                new_shapes = []
-                for i, shape in enumerate(polygon_shapes):
-                    progress_dialog.update_operation_progress(int((i+1) * 100 / len(polygon_shapes)))
-                    rotated_rect_shape = shape.calculate_minimum_rotated_rectangle()
-                    if rotated_rect_shape:
-                        new_shapes.append(rotated_rect_shape)
-                
-                # 添加新形状到画布
-                canvas.shapes.extend(new_shapes)
-                
-                # 新增代码：如果选择了隐藏原始多边形，则设置所有多边形为不可见
-                if self.batch_options.get("hide_original_polygons", False):
-                    for shape in polygon_shapes:
-                        shape.visible = False
-                    progress_dialog.update_status(f"Tab {tab_index + 1}: Original polygons hidden")
-                
-                # 恢复选中状态
-                canvas.selected_shape = temp_selected
-                canvas.update()
-                
-                progress_dialog.update_operation_progress(100)
-                results["operations"]["mer"]["success"] += 1
-            else:
-                progress_dialog.update_status(f"No polygon shapes in tab {tab_index + 1}")
-                results["operations"]["mer"]["skipped"] = results["operations"]["mer"].get("skipped", 0) + 1
-        
-        except Exception as e:
-            progress_dialog.update_status(f"Error in tab {tab_index + 1} MER operation: {str(e)}")
-            results["operations"]["mer"]["failed"] += 1
-    
-    def _process_feature_extraction(self, tab_index, graphics_view, progress_dialog, results):
-        """处理特征提取操作"""
-        try:
-            progress_dialog.update_operation("Extracting features")
-            progress_dialog.update_operation_progress(0)
-            
-            canvas = graphics_view.canvas
-            visible_shapes = [s for s in canvas.shapes if s.visible]
-            
-            if visible_shapes:
-                # 获取图像尺寸（用于结果汇总）
-                image_size = canvas.image_size
-                image_width = image_size.width()
-                image_height = image_size.height()
-                
-                # 获取比例尺信息 - 全局优先
-                scale_info = None
-                # 检查是否使用全局比例尺
-                if hasattr(self.main_window, 'global_scale_info') and self.main_window.global_scale_info:
-                    scale_info = self.main_window.global_scale_info
-                    progress_dialog.update_status(f"Tab {tab_index + 1}: Using global scale ({scale_info['scale']} {scale_info['unit']})")
-                # 否则尝试使用当前视图的比例尺
-                elif hasattr(graphics_view, 'scale_info') and graphics_view.scale_info:
-                    scale_info = graphics_view.scale_info
-                    progress_dialog.update_status(f"Tab {tab_index + 1}: Using local scale ({scale_info['scale']} {scale_info['unit']})")
-                else:
-                    progress_dialog.update_status(f"Tab {tab_index + 1}: No scale information available. Using pixel units.")
-                
-                # 执行特征提取
-                for i, s in enumerate(visible_shapes):
-                    progress_dialog.update_operation_progress(int((i+1) * 100 / len(visible_shapes)))
-                    if s.shape_type == "polygon":
-                        s.feature_extraction_polygon(scale_info=scale_info)
-                    elif s.shape_type == "rectangle":
-                        s.feature_extraction_rectangle(scale_info=scale_info)
-                    elif s.shape_type == "rotated_rectangle":
-                        s.feature_extraction_rotated_rectangle(scale_info=scale_info)
-                    elif s.shape_type == "line":
-                        s.feature_extraction_line(scale_info=scale_info)
-                    elif s.shape_type == "point":
-                        s.feature_extraction_point(scale_info=scale_info)
-                
-                progress_dialog.update_operation_progress(100)
-                results["operations"]["feature_extraction"]["success"] += 1
-                
-                # 更新当前标签页的结果显示（如果处理的是当前显示的标签页）
-                if tab_index == self.main_window.tabWidget.currentIndex():
-                    self.main_window.measured_results_dock.populate(visible_shapes)
-                    self.main_window.image_results_summary_dock.populate(
-                        visible_shapes, image_width, image_height, scale_info
-                    )
-            else:
-                progress_dialog.update_status(f"No visible shapes in tab {tab_index + 1}")
-                results["operations"]["feature_extraction"]["skipped"] = results["operations"]["feature_extraction"].get("skipped", 0) + 1
-        
-        except Exception as e:
-            progress_dialog.update_status(f"Error in tab {tab_index + 1} feature extraction: {str(e)}")
-            results["operations"]["feature_extraction"]["failed"] += 1
+        """Create MERs for valid polygons; report invalid ones per shape."""
+        progress_dialog.update_operation('Calculating Minimum Enclosing Rectangle')
+        progress_dialog.update_operation_progress(0)
+        canvas = graphics_view.canvas
+        polygons = [s for s in canvas.shapes if s.visible and s.shape_type == 'polygon']
+        if not polygons:
+            results['operations']['mer']['skipped'] += 1
+            return
+        created, sources, errors = [], [], []
+        for index, shape in enumerate(polygons):
+            if index % 32 == 0:
+                QApplication.processEvents()
+                check_cancelled(lambda: progress_dialog.canceled
+                                or getattr(self.main_window, '_closing_requested', False)
+                                or sip.isdeleted(graphics_view) or graphics_view.canvas is not canvas)
+            try:
+                mer = shape.calculate_minimum_rotated_rectangle(
+                    minimum_rectangle_size(canvas.image_size.width(), canvas.image_size.height()))
+                if mer is None:
+                    raise ValueError('Cannot create a valid MER')
+                created.append(mer)
+                sources.append(shape)
+            except Exception as error:
+                errors.append(f'{shape.label} / Group ID {shape.group_id}: {error}')
+            progress_dialog.update_operation_progress(int((index + 1) * 100 / len(polygons)))
+        if created:
+            canvas.save_state()
+            canvas.shapes.extend(created)
+            if self.batch_options.get('hide_original_polygons', False):
+                for shape in sources:
+                    shape.visible = False
+            canvas.update()
+            results['operations']['mer']['success'] += 1
+        else:
+            results['operations']['mer']['skipped'] += 1
+        if errors:
+            results.setdefault('shape_errors', []).extend(
+                f'Tab {tab_index + 1} / MER / {message}' for message in errors)
+            progress_dialog.update_status(f'{len(errors)} polygon(s) skipped during MER; see Batch summary.')
+        progress_dialog.update_operation_progress(100)
 
-    
     def _process_heatmap_operation(self, tab_index, graphics_view, progress_dialog, results):
-        """处理热图操作"""
+        progress_dialog.update_operation('Generating heatmap')
+        shapes = [s for s in graphics_view.canvas.shapes if s.visible and s.shape_type=='polygon']
+        if not shapes:
+            results['operations']['heatmap']['skipped'] = results['operations']['heatmap'].get('skipped',0)+1
+            return
+        scale_info = resolve_scale(self.main_window,graphics_view)
+        for shape in shapes:
+            ensure_features(shape,scale_info,force=True)
+        settings = getattr(self,'batch_heatmap_settings',{}) or getattr(self.main_window,'heatmap_settings',{})
+        tab = self.main_window.tabWidget.widget(tab_index)
+        manager = task_manager(self.main_window); task = manager.begin(tab,'heatmap')
         try:
-            progress_dialog.update_operation("正在生成热图")
-            progress_dialog.update_operation_progress(0)
-            
-            # 获取当前可见的多边形形状
-            canvas = graphics_view.canvas
-            shapes = [s for s in canvas.shapes if s.visible and s.shape_type == 'polygon']
-            
-            # 获取当前标签页和文件信息
-            tab = self.main_window.tabWidget.widget(tab_index)
-            file_path = tab.property("file_path") if tab else None
-            file_name = os.path.basename(file_path) if file_path else f"tab_{tab_index + 1}"
-            
-            if shapes and any(hasattr(s, 'feature_results') and s.feature_results for s in shapes):
-                # 使用预设的热图设置
-                heatmap_settings = getattr(self.main_window, 'heatmap_settings', {})
-                # 使用从对话框获取的批处理热图设置
-                if hasattr(self, 'batch_heatmap_settings') and self.batch_heatmap_settings:
-                    heatmap_settings = self.batch_heatmap_settings
-                    
-                feature_name = heatmap_settings.get("feature", "Area")  # 默认特征
-                colormap_name = heatmap_settings.get("colormap", "viridis")  # 默认颜色图
-                
-                # 获取比例尺信息 - 与单个图像处理保持一致
-                scale_info = None
-                # 检查特征是否需要比例尺
-                needs_scale = feature_name in ["Area", "Perimeter", "MER Length", "MER Width"]
-                
-                # 如果需要比例尺，则尝试获取
-                if needs_scale:
-                    # 优先使用全局比例尺
-                    if hasattr(self.main_window, 'global_scale_info') and self.main_window.global_scale_info:
-                        scale_info = self.main_window.global_scale_info
-                        progress_dialog.update_status(f"Tab {tab_index + 1}: Using global scale for heatmap")
-                    # 否则尝试使用当前视图的比例尺
-                    elif hasattr(graphics_view, 'scale_info') and graphics_view.scale_info:
-                        scale_info = graphics_view.scale_info
-                        progress_dialog.update_status(f"Tab {tab_index + 1}: Using local scale for heatmap")
-                    else:
-                        progress_dialog.update_status(f"Tab {tab_index + 1}: Warning - {feature_name} requires scale but no scale information is available")
-                
-                # 设置输出路径
-                output_path = heatmap_settings.get("output_path", os.path.join(os.getcwd(), "Heatmaps"))
-                os.makedirs(output_path, exist_ok=True)
-                
-                # 获取图像
-                original_pixmap = graphics_view.pixmap_item.pixmap()
-                original_image = original_pixmap.toImage()
-                
-                # 创建并等待热图线程
-                loop = QEventLoop()
-                heatmap_result = {"path": "", "error": None}
-                
-                def on_heatmap_generated(file_path, error):
-                    heatmap_result["path"] = file_path
-                    heatmap_result["error"] = error
-                    loop.quit()
-                
-                # 创建热图线程 - 加入文件名和比例尺信息
-                heatmap_thread = HeatMapGenerationThread(
-                    original_image,
-                    shapes,
-                    feature_name,
-                    colormap_name,
-                    output_path,
-                    file_path,  # 传递原始文件路径用于命名
-                    scale_info,  # 传递比例尺信息
-                    self.main_window
-                )
-                heatmap_thread.heatmapGenerated.connect(on_heatmap_generated)
-                
-                # 启动线程
-                heatmap_thread.start()
-                
-                # 进度更新
-                progress_timer = QTimer()
-                progress_value = 0
-                
-                def update_progress():
-                    nonlocal progress_value
-                    progress_value = min(99, progress_value + 5)
-                    progress_dialog.update_operation_progress(progress_value)
-                    
-                progress_timer.timeout.connect(update_progress)
-                progress_timer.start(500)
-                
-                # 等待线程完成
-                loop.exec_()
-                progress_timer.stop()
-                
-                if heatmap_result["error"]:
-                    progress_dialog.update_status(f"标签页 {tab_index + 1} 生成热图时出错: {heatmap_result['error']}")
-                    results["operations"]["heatmap"]["failed"] += 1
-                else:
-                    progress_dialog.update_operation_progress(100)
-                    progress_dialog.update_status(f"标签页 {tab_index + 1}: 热图已保存至: {heatmap_result['path']}")
-                    results["operations"]["heatmap"]["success"] += 1
-            else:
-                if not shapes:
-                    progress_dialog.update_status(f"标签页 {tab_index + 1} 中没有多边形形状")
-                else:
-                    progress_dialog.update_status(f"标签页 {tab_index + 1} 中没有可用的特征数据")
-                results["operations"]["heatmap"]["skipped"] = results["operations"]["heatmap"].get("skipped", 0) + 1
-        
-        except Exception as e:
-            progress_dialog.update_status(f"标签页 {tab_index + 1} 热图生成出错: {str(e)}")
-            results["operations"]["heatmap"]["failed"] += 1
+            worker = HeatMapGenerationThread(graphics_view.pixmap_item.pixmap().toImage(),shapes,
+                settings.get('feature','Area'),settings.get('colormap','viridis'),
+                settings.get('output_path',
+                             macos_output_dir('Heatmaps') if sys.platform == 'darwin'
+                             else os.path.join(os.getcwd(),'Heatmaps')),
+                task.file_path,scale_info,self.main_window)
+            path,error = wait_for_worker(manager,task,worker,worker.heatmapGenerated,lambda: progress_dialog.canceled)
+            if error:
+                raise error if isinstance(error,Exception) else RuntimeError(error)
+            if not path:
+                raise ValueError('Heatmap output was not produced')
+            results['operations']['heatmap']['success'] += 1
+            progress_dialog.update_status(f'Heatmap saved: {path}')
+            progress_dialog.update_operation_progress(100)
+        finally:
+            manager.finish(task)
     
 # 修改_process_yolo_results方法
 
-    def _process_yolo_results(self, results, file_path, canvas):
-        """处理YOLO推理结果并将其添加到指定的Canvas上，包含与主文件一致的处理逻辑"""
-        try:
-            # 创建用于存储box类型形状的列表
-            box_shapes = []
-            # 检查结果是否有效
-            if not results:
-                return []
-            
-            # 处理输出目录
-            output_dir = self.main_window.inference_settings.get("save_path", os.path.join(os.getcwd(), "Inference_OutPut")) if hasattr(self.main_window, 'inference_settings') else os.path.join(os.getcwd(), "Inference_OutPut")
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # 标记是否有segments类型的数据
-            has_segments = False
-            
-            # 处理每个结果
-            for result in results:
-                json_str = result.to_json()
-                json_obj = json.loads(json_str)
-                
-                # 生成并保存JSON文件
-                json_file_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(result.path))[0]}.json")
-                
-                with open(json_file_path, 'w') as json_file:
-                    json.dump(json_obj, json_file, indent=4)
-                
-                # 处理JSON对象中的形状数据
-                if isinstance(json_obj, list):
-                    image_size = canvas.image_size
-                    image_width = image_size.width()
-                    image_height = image_size.height()
-                    
-                    # 处理类别计数，与主文件保持一致
-                    class_counts = defaultdict(int)
-                    
-                    # 直接处理box类型的项目
-                    for item in json_obj:
-                        # 仅处理box类型
-                        if 'segments' not in item and 'box' in item:
-                            box = item['box']
-                            x1, y1 = box.get('x1', 0), box.get('y1', 0)
-                            x2, y2 = box.get('x2', 0), box.get('y2', 0)
-                            top_left = QPointF(x1, y1)
-                            bottom_right = QPointF(x2, y2)
-                            label = item.get('name', 'undefined')
-                            classnum = item.get('class', 'undefined')
-                            
-                            # 分配group_id与主文件保持一致
-                            group_id = class_counts[classnum]
-                            class_counts[classnum] += 1
-                            
-                            # 创建矩形形状
-                            shape = Shape(
-                                label=label, 
-                                classnum=classnum,
-                                pointslist=[top_left, bottom_right], 
-                                shape_type='rectangle', 
-                                group_id=group_id,
-                                scale_factor=canvas.scale_factor
-                            )
-                            box_shapes.append(shape)
-                        
-                        # 检查是否有多边形(segments)数据
-                        elif 'segments' in item:
-                            has_segments = True
-                            
-                    # 如果存在segments类型数据，在批处理中我们直接处理它们
-                    # 因为在批处理中启动新线程并等待可能会造成UI阻塞
-                    if has_segments:
-                        # 收集所有具有segments的项
-                        segment_items = [item for item in json_obj if 'segments' in item]
-                        if segment_items:
-                            # 按classnum分组收集坐标
-                            polygons_by_class = {}
-                            for item in segment_items:
-                                x_coords = item['segments'].get('x', [])
-                                y_coords = item['segments'].get('y', [])
-                                if len(x_coords) != len(y_coords):
-                                    continue
-                                    
-                                classnum = item.get('class', 'undefined')
-                                if classnum not in polygons_by_class:
-                                    polygons_by_class[classnum] = []
-                                
-                                polygons_by_class[classnum].append((x_coords, y_coords))
-                            
-                            # 在批处理中，直接处理多边形数据而不启动新线程
-                            if polygons_by_class:
-                                # 调用处理函数
-                                processed_map = process_polygon_data(
-                                    polygons_by_class, image_width, image_height)
-                                
-                                # 处理结果转换为Shape对象
-                                for classnum, polygons in processed_map.items():
-                                    for i, (pointsx, pointsy) in enumerate(polygons):
-                                        points = [QPointF(x, y) for x, y in zip(pointsx, pointsy)]
-                                        if len(points) >= 3:
-                                            # 创建多边形形状
-                                            shape = Shape(
-                                                label=f"class_{classnum}",
-                                                classnum=classnum,
-                                                pointslist=points,
-                                                shape_type='polygon',
-                                                group_id=i,
-                                                scale_factor=canvas.scale_factor
-                                            )
-                                            box_shapes.append(shape)
-            
-            # 将形状添加到画布
-            canvas.shapes.extend(box_shapes)
-            canvas.update()
-            
-            # 更新UI - 使用主窗口中已定义的更完整方法
-            self.main_window.labeldockinstance.populate(canvas.shapes, Shape.get_color_by_classnum)
-            self.main_window.shapedockinstance.populate(canvas.shapes)
-            
-            # 设置为编辑模式
+    def _process_yolo_results(self, results, file_path, canvas, task=None, progress_dialog=None):
+        settings = task.settings if task else (self.main_window.inference_settings or {})
+        output_dir = settings.get('save_path',
+                                  macos_output_dir('Inference_OutPut') if sys.platform == 'darwin'
+                                  else os.path.join(os.getcwd(),'Inference_OutPut'))
+        records, polygons = decode_predictions(results,output_dir)
+        processed = {}
+        if polygons:
+            size = canvas.image_size
+            if task is not None:
+                worker = PolygonProcessThread(polygons,size.width(),size.height(),records,self.main_window)
+                processed, records, error = wait_for_worker(task_manager(self.main_window),task,worker,
+                    worker.processingFinished,lambda: progress_dialog.canceled)
+                if error:
+                    raise error if isinstance(error,Exception) else RuntimeError(error)
+            else:
+                processed = process_polygon_data(polygons,size.width(),size.height())
+        if task is not None:
+            check_cancelled(lambda: not task_manager(self.main_window).valid(task))
+        rejected = save_polygon_audit(processed,file_path,output_dir)
+        self.rejected_predictions = getattr(self, 'rejected_predictions', 0) + len(rejected)
+        shapes = shapes_from_predictions(records,processed,canvas)
+        if shapes:
+            canvas.save_state()
+            canvas.shapes.extend(shapes)
             canvas.set_mode('edit')
-            
-            return box_shapes
-                
-        except Exception as e:
-            print(f"Error processing YOLO results: {str(e)}")
-            print(traceback.format_exc())
-            return []
+            if not getattr(self.main_window, '_defer_batch_refresh', False):
+                canvas.update(); canvas.shapesChanged.emit()
+        return shapes
 
     def _display_results_summary(self, tab_count, results, options):
-        """显示批处理结果摘要"""
-        summary = "Batch Processing Results:\n\n"
-        summary += f"Total tabs: {tab_count}\n"
-        summary += f"Successfully processed: {results['success']}\n"
-        summary += f"Failed: {results['failed']}\n"
-        summary += f"Skipped: {results['skipped']}\n\n"
-        
-        if results["operations"]:
-            summary += "Operations Summary:\n"
-            
-            # 添加Group ID显示设置
-            summary += f"  - Group ID Display: Set to '{options['group_id_display']}'\n"
-            
-            # 添加类别可见性设置信息 - 新增代码
-            if 'class_visibility' in options and options.get('filter'):
-                class_visibility = options['class_visibility']
-                summary += "  - Class Visibility Settings:\n"
-                summary += f"    - Class 0 (stoma): {'Visible' if class_visibility[0] else 'Hidden'}\n"
-                summary += f"    - Class 1 (pore/cell): {'Visible' if class_visibility[1] else 'Hidden'}\n"
-            
-            for op_name, counts in results["operations"].items():
-                if op_name in options and options[op_name]:
-                    success = counts.get("success", 0)
-                    failed = counts.get("failed", 0)
-                    skipped = counts.get("skipped", 0)
-                    summary += f"  - {op_name.replace('_', ' ').title()}: {success} success, {failed} failed, {skipped} skipped\n"
-        
-        QMessageBox.information(self.main_window, "Batch Processing Complete", summary)
+        lines = ['Batch Processing Results:', f'Total tabs: {tab_count}']
+        lines.extend(f'{key.title()}: {results[key]}' for key in ('success','failed','skipped','canceled'))
+        for name,counts in results['operations'].items():
+            lines.append(name + ': ' + ', '.join(f'{value} {key}' for key,value in counts.items()))
+        if getattr(self, 'rejected_predictions', 0):
+            lines.append(f'Invalid predicted polygons skipped: {self.rejected_predictions}. See postprocess audit.')
+        for error in results.get('errors',[])[:20]:
+            lines.append(f"Tab {error['tab']} / {error['operation']}: {error['error']}")
+        for error in results.get('shape_errors', [])[:20]:
+            lines.append(error)
+        QMessageBox.information(self.main_window,'Batch Processing Complete','\n'.join(lines))
 
 # BatchFeatureExporter 类
 class BatchFeatureExporter:
@@ -870,13 +558,15 @@ class BatchFeatureExporter:
         progress.setValue(0)
 
         all_data = []
-        fieldnames = set()
+        from measurement_rows import HEADERS
+        fieldnames = {header.split(' (')[0] for header in HEADERS[shape_type][2:]}
+        fieldnames.update(('Label', 'Group ID'))
         base_fields = ['File Path', 'File Name']
 
         try:
             for i in range(tab_count):
                 if progress.wasCanceled():
-                    break
+                    return
                 
                 progress.setValue(i)
                 tab = self.main_window.tabWidget.widget(i)
@@ -892,39 +582,47 @@ class BatchFeatureExporter:
                 
                 canvas = graphics_view.canvas
                 # 筛选特定类型的形状
-                shapes = [s for s in canvas.shapes if s.shape_type == shape_type]
+                shapes = [s for s in canvas.shapes if s.shape_type == shape_type and s.visible]
                 
                 if not shapes:
                     continue
 
                 # 确定比例尺信息
                 scale_info = None
-                if hasattr(self.main_window, 'global_scale_info') and self.main_window.global_scale_info:
-                    scale_info = self.main_window.global_scale_info
-                elif hasattr(graphics_view, 'scale_info'):
-                    scale_info = graphics_view.scale_info
-                
+                from measurements import resolve_scale
+                scale_info = resolve_scale(self.main_window, graphics_view)
                 # 提取特征
-                for shape in shapes:
-                    # 确保特征已计算
-                    if not shape.feature_results:
-                        if shape_type == 'polygon':
-                            shape.feature_extraction_polygon(scale_info)
-                        elif shape_type == 'rotated_rectangle':
-                            shape.feature_extraction_rotated_rectangle(scale_info)
-                        elif shape_type == 'rectangle':
-                            shape.feature_extraction_rectangle(scale_info)
-                        elif shape_type == 'point':
-                            shape.feature_extraction_point(scale_info)
-                    
+                for shape_index, shape in enumerate(shapes):
+                    if shape_index % 32 == 0:
+                        QApplication.processEvents()
+                        if progress.wasCanceled() or getattr(self.main_window, '_closing_requested', False):
+                            return
+                        if sip.isdeleted(tab) or self.main_window.tabWidget.indexOf(tab) < 0:
+                            raise ValueError('Export target image was closed.')
+                    try:
+                        ensure_features(shape, scale_info)
+                        shape.measurement_error = None
+                    except Exception as error:
+                        shape.feature_results = {}
+                        shape.measurement_error = str(error)
+                    if not shape.feature_results and not shape.measurement_error:
+                        shape.measurement_error = 'No measurement result'
+
                     # 收集数据
-                    if shape.feature_results:
+                    if shape.feature_results or shape.measurement_error:
                         row_data = {
                             'File Path': file_path_img,
-                            'File Name': file_name
+                            'File Name': file_name,
+                            'Label': shape.label,
+                            'Group ID': shape.group_id,
+                            'Measurement Status': 'Failed' if shape.measurement_error else 'OK',
+                            'Measurement Error': shape.measurement_error or ''
                         }
                         # 将特征结果合并到行数据中
                         row_data.update(shape.feature_results)
+                        row_data['Measurement Unit'] = (scale_info or {}).get('unit', 'pixel')
+                        row_data['Scale (unit/pixel)'] = (scale_info or {}).get('scale', 1.0)
+                        row_data['Coordinate Unit'] = 'pixel'
                         all_data.append(row_data)
                         # 收集所有出现的字段名
                         fieldnames.update(shape.feature_results.keys())
@@ -937,12 +635,18 @@ class BatchFeatureExporter:
 
             # 排序字段名：基础字段在前，其他字段按字母顺序排列
             sorted_fieldnames = base_fields + [f for f in sorted(list(fieldnames)) if f not in base_fields]
+            sorted_fieldnames += ['Measurement Status', 'Measurement Error']
+            sorted_fieldnames += ['Measurement Unit', 'Scale (unit/pixel)', 'Coordinate Unit']
+            for row_data in all_data:
+                for field in fieldnames:
+                    row_data.setdefault(field, 'NA')
 
             # 写入CSV
-            with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+            with io.StringIO(newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=sorted_fieldnames)
                 writer.writeheader()
                 writer.writerows(all_data)
+                write_text_atomic(file_path, csvfile.getvalue(), encoding='utf-8-sig')
 
             QtWidgets.QMessageBox.information(self.main_window, "Export Successful", f"Successfully exported features to:\n{file_path}")
 
@@ -950,8 +654,15 @@ class BatchFeatureExporter:
             QtWidgets.QMessageBox.critical(self.main_window, "Export Error", f"An error occurred: {str(e)}")
         finally:
             progress.close()
+            if hasattr(self.main_window, 'measurement_controller'):
+                self.main_window.measurement_controller.refresh_tabs()
+            mark_batch_fit(self.main_window)
 
 class BatchExporter:
+    def export_points(self):
+        """Export native Point shapes from every open image, including empty TXT files."""
+        return batch_points(self.main_window)
+
     def __init__(self, main_window):
         """
         初始化批量导出器
@@ -960,10 +671,14 @@ class BatchExporter:
         """
         self.main_window = main_window
         
+    @annotation_batch(restore_original=True)
     def export_polygons(self):
         """批量导出所有标签页中的多边形形状"""
         # 获取所有打开的标签页
-        tab_count = self.main_window.tabWidget.count()
+        tabs = [self.main_window.tabWidget.widget(i) for i in range(self.main_window.tabWidget.count())]
+        tab_count = len(tabs)
+        source_counts = Counter(os.path.splitext(os.path.basename(tab.property('file_path') or ''))[0].casefold()
+                                for tab in tabs)
         if tab_count == 0:
             QtWidgets.QMessageBox.warning(self.main_window, "Batch Export", "No image tabs open. Please open some images first.")
             return
@@ -987,6 +702,7 @@ class BatchExporter:
         progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
         progress_dialog.setMinimumDuration(0)
         progress_dialog.setValue(0)
+        self.main_window._annotation_batch.progress = progress_dialog
         
         # 保存当前标签页索引
         current_tab_index = self.main_window.tabWidget.currentIndex()
@@ -994,6 +710,7 @@ class BatchExporter:
         # 统计信息
         exported_count = 0
         skipped_count = 0
+        failures = []
         
         try:
             for tab_index in range(tab_count):
@@ -1006,11 +723,14 @@ class BatchExporter:
                 progress_dialog.setLabelText(f"Exporting tab {tab_index + 1}/{tab_count}...")
                 
                 # 切换到当前标签页
-                self.main_window.tabWidget.setCurrentIndex(tab_index)
+                # The target is bound directly; do not activate its GUI.
                 QtWidgets.QApplication.processEvents()  # 确保UI更新
                 
                 # 获取当前标签页信息
-                tab = self.main_window.tabWidget.widget(tab_index)
+                tab = tabs[tab_index]
+                if sip.isdeleted(tab) or self.main_window.tabWidget.indexOf(tab) < 0:
+                    skipped_count += 1
+                    continue
                 file_path = tab.property("file_path")
                 file_name = os.path.basename(file_path) if file_path else f"tab_{tab_index + 1}"
                 
@@ -1033,15 +753,18 @@ class BatchExporter:
                     
                 # 生成导出文件名
                 export_filename = f"Polygon_Annotation_Batch_Exported_by_StomataQuant_{os.path.splitext(file_name)[0]}.txt"
-                export_path = os.path.join(polygon_dir, export_filename)
+                if file_path and source_counts[os.path.splitext(file_name)[0].casefold()] > 1:
+                    export_filename = export_filename[:-4] + '__' + source_suffix(file_path) + '.txt'
                 
                 # 导出多边形
                 try:
-                    with open(export_path, 'w') as f:
+                    with io.StringIO() as f:
                         image_width = canvas.image_size.width()
                         image_height = canvas.image_size.height()
                         
-                        for shape in polygon_shapes:
+                        for shape_index, shape in enumerate(polygon_shapes):
+                            if shape_index % 256 == 0:
+                                checkpoint(self.main_window, tab, canvas)
                             # YOLO格式: <class> <x1> <y1> <x2> <y2> ... <xn> <yn>
                             points_str = ""
                             for point in shape.pointslist:
@@ -1053,17 +776,24 @@ class BatchExporter:
                             # 写入YOLO格式的行
                             f.write(f"{shape.classnum}{points_str}\n")
                             
+                        content = f.getvalue()
+                    validate_polygon_export(content, image_width, image_height, export_filename,
+                                            polygon_shapes)
+                    checkpoint(self.main_window, tab, canvas)
+                    write_unique_text_atomic(polygon_dir, export_filename, file_path, content)
                     exported_count += 1
+                except OperationCancelled:
+                    raise
                 except Exception as e:
                     print(f"Error exporting polygons from tab {tab_index + 1}: {str(e)}")
-                    skipped_count += 1
+                    failures.append(f"Tab {tab_index + 1} ({file_name}): {e}")
                 
                 # 更新进度
                 progress_dialog.setValue(tab_index + 1)
                 QtWidgets.QApplication.processEvents()  # 确保UI更新
                 
             # 恢复到原来的标签页
-            self.main_window.tabWidget.setCurrentIndex(current_tab_index)
+            # Original target restoration is handled by the batch session.
             
             # 关闭进度对话框
             progress_dialog.close()
@@ -1074,7 +804,8 @@ class BatchExporter:
                     self.main_window,
                     "Export Complete",
                     f"Successfully exported polygon annotations from {exported_count} tabs.\n"
-                    f"Skipped {skipped_count} tabs (no polygon shapes).\n\n"
+                    f"Skipped {skipped_count} tabs (no polygon shapes or unavailable).\n"
+                    f"Failed to export {len(failures)} tabs.\n" + '\n'.join(failures) + "\n\n"
                     f"Files saved to: {polygon_dir}"
                 )
             else:
@@ -1082,9 +813,12 @@ class BatchExporter:
                     self.main_window,
                     "Export Complete",
                     f"No polygon annotations were exported.\n"
-                    f"All {skipped_count} tabs have no polygon shapes."
+                    f"{skipped_count} tabs have no polygon shapes or are unavailable.\n"
+                    f"Failed to export {len(failures)} tabs.\n" + '\n'.join(failures)
                 )
                 
+        except OperationCancelled:
+            raise
         except Exception as e:
             progress_dialog.close()
             QtWidgets.QMessageBox.critical(
@@ -1093,10 +827,14 @@ class BatchExporter:
                 f"An error occurred during batch export: {str(e)}"
             )
             
+    @annotation_batch(restore_original=True)
     def export_rectangles(self):
         """批量导出所有标签页中的矩形形状"""
         # 获取所有打开的标签页
-        tab_count = self.main_window.tabWidget.count()
+        tabs = [self.main_window.tabWidget.widget(i) for i in range(self.main_window.tabWidget.count())]
+        tab_count = len(tabs)
+        source_counts = Counter(os.path.splitext(os.path.basename(tab.property('file_path') or ''))[0].casefold()
+                                for tab in tabs)
         if tab_count == 0:
             QtWidgets.QMessageBox.warning(self.main_window, "Batch Export", "No image tabs open. Please open some images first.")
             return
@@ -1120,6 +858,7 @@ class BatchExporter:
         progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
         progress_dialog.setMinimumDuration(0)
         progress_dialog.setValue(0)
+        self.main_window._annotation_batch.progress = progress_dialog
         
         # 保存当前标签页索引
         current_tab_index = self.main_window.tabWidget.currentIndex()
@@ -1127,6 +866,7 @@ class BatchExporter:
         # 统计信息
         exported_count = 0
         skipped_count = 0
+        failures = []
         
         try:
             for tab_index in range(tab_count):
@@ -1139,11 +879,14 @@ class BatchExporter:
                 progress_dialog.setLabelText(f"Exporting tab {tab_index + 1}/{tab_count}...")
                 
                 # 切换到当前标签页
-                self.main_window.tabWidget.setCurrentIndex(tab_index)
+                # The target is bound directly; do not activate its GUI.
                 QtWidgets.QApplication.processEvents()  # 确保UI更新
                 
                 # 获取当前标签页信息
-                tab = self.main_window.tabWidget.widget(tab_index)
+                tab = tabs[tab_index]
+                if sip.isdeleted(tab) or self.main_window.tabWidget.indexOf(tab) < 0:
+                    skipped_count += 1
+                    continue
                 file_path = tab.property("file_path")
                 file_name = os.path.basename(file_path) if file_path else f"tab_{tab_index + 1}"
                 
@@ -1166,15 +909,18 @@ class BatchExporter:
                 # 生成导出文件名
                 # export_filename = os.path.splitext(file_name)[0] + "_rectangle.txt"
                 export_filename = f"Rectangle_Annotation_Batch_Exported_by_StomataQuant_{os.path.splitext(file_name)[0]}.txt"
-                export_path = os.path.join(rectangle_dir, export_filename)
+                if file_path and source_counts[os.path.splitext(file_name)[0].casefold()] > 1:
+                    export_filename = export_filename[:-4] + '__' + source_suffix(file_path) + '.txt'
                 
                 # 导出矩形
                 try:
-                    with open(export_path, 'w') as f:
+                    with io.StringIO() as f:
                         image_width = canvas.image_size.width()
                         image_height = canvas.image_size.height()
                         
-                        for shape in rectangle_shapes:
+                        for shape_index, shape in enumerate(rectangle_shapes):
+                            if shape_index % 256 == 0:
+                                checkpoint(self.main_window, tab, canvas)
                             if len(shape.pointslist) == 2:
                                 # 获取两个点
                                 p1 = shape.pointslist[0]
@@ -1195,17 +941,24 @@ class BatchExporter:
                                 # 写入YOLO格式的行
                                 f.write(f"{shape.classnum} {norm_center_x:.6f} {norm_center_y:.6f} {norm_width:.6f} {norm_height:.6f}\n")
                                 
+                        content = f.getvalue()
+                    validate_rectangle_export(rectangle_shapes, content, 'rectangle',
+                                              image_width, image_height, export_filename)
+                    checkpoint(self.main_window, tab, canvas)
+                    write_unique_text_atomic(rectangle_dir, export_filename, file_path, content)
                     exported_count += 1
+                except OperationCancelled:
+                    raise
                 except Exception as e:
                     print(f"Error exporting rectangles from tab {tab_index + 1}: {str(e)}")
-                    skipped_count += 1
+                    failures.append(f"Tab {tab_index + 1} ({file_name}): {e}")
                 
                 # 更新进度
                 progress_dialog.setValue(tab_index + 1)
                 QtWidgets.QApplication.processEvents()  # 确保UI更新
                 
             # 恢复到原来的标签页
-            self.main_window.tabWidget.setCurrentIndex(current_tab_index)
+            # Original target restoration is handled by the batch session.
             
             # 关闭进度对话框
             progress_dialog.close()
@@ -1216,7 +969,8 @@ class BatchExporter:
                     self.main_window,
                     "Export Complete",
                     f"Successfully exported rectangle annotations from {exported_count} tabs.\n"
-                    f"Skipped {skipped_count} tabs (no rectangle shapes).\n\n"
+                    f"Skipped {skipped_count} tabs (no rectangle shapes or unavailable).\n"
+                    f"Failed to export {len(failures)} tabs.\n" + '\n'.join(failures) + "\n\n"
                     f"Files saved to: {rectangle_dir}"
                 )
             else:
@@ -1224,9 +978,12 @@ class BatchExporter:
                     self.main_window,
                     "Export Complete",
                     f"No rectangle annotations were exported.\n"
-                    f"All {skipped_count} tabs have no rectangle shapes."
+                    f"{skipped_count} tabs have no rectangle shapes or are unavailable.\n"
+                    f"Failed to export {len(failures)} tabs.\n" + '\n'.join(failures)
                 )
                 
+        except OperationCancelled:
+            raise
         except Exception as e:
             progress_dialog.close()
             QtWidgets.QMessageBox.critical(
@@ -1235,10 +992,14 @@ class BatchExporter:
                 f"An error occurred during batch export: {str(e)}"
             )
             
+    @annotation_batch(restore_original=True)
     def export_rotated_rectangles(self):
         """批量导出所有标签页中的旋转矩形形状"""
         # 获取所有打开的标签页
-        tab_count = self.main_window.tabWidget.count()
+        tabs = [self.main_window.tabWidget.widget(i) for i in range(self.main_window.tabWidget.count())]
+        tab_count = len(tabs)
+        source_counts = Counter(os.path.splitext(os.path.basename(tab.property('file_path') or ''))[0].casefold()
+                                for tab in tabs)
         if tab_count == 0:
             QtWidgets.QMessageBox.warning(self.main_window, "Batch Export", "No image tabs open. Please open some images first.")
             return
@@ -1262,6 +1023,7 @@ class BatchExporter:
         progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
         progress_dialog.setMinimumDuration(0)
         progress_dialog.setValue(0)
+        self.main_window._annotation_batch.progress = progress_dialog
         
         # 保存当前标签页索引
         current_tab_index = self.main_window.tabWidget.currentIndex()
@@ -1269,6 +1031,7 @@ class BatchExporter:
         # 统计信息
         exported_count = 0
         skipped_count = 0
+        failures = []
         
         try:
             for tab_index in range(tab_count):
@@ -1281,11 +1044,14 @@ class BatchExporter:
                 progress_dialog.setLabelText(f"Exporting tab {tab_index + 1}/{tab_count}...")
                 
                 # 切换到当前标签页
-                self.main_window.tabWidget.setCurrentIndex(tab_index)
+                # The target is bound directly; do not activate its GUI.
                 QtWidgets.QApplication.processEvents()  # 确保UI更新
                 
                 # 获取当前标签页信息
-                tab = self.main_window.tabWidget.widget(tab_index)
+                tab = tabs[tab_index]
+                if sip.isdeleted(tab) or self.main_window.tabWidget.indexOf(tab) < 0:
+                    skipped_count += 1
+                    continue
                 file_path = tab.property("file_path")
                 file_name = os.path.basename(file_path) if file_path else f"tab_{tab_index + 1}"
                 
@@ -1308,15 +1074,18 @@ class BatchExporter:
                 # 生成导出文件名
                 # export_filename = os.path.splitext(file_name)[0] + "_rotated_rectangle.txt"
                 export_filename = f"Rotated_Rectangle_Annotation_Batch_Exported_by_StomataQuant_{os.path.splitext(file_name)[0]}.txt"
-                export_path = os.path.join(rotated_rect_dir, export_filename)
+                if file_path and source_counts[os.path.splitext(file_name)[0].casefold()] > 1:
+                    export_filename = export_filename[:-4] + '__' + source_suffix(file_path) + '.txt'
                 
                 # 导出旋转矩形
                 try:
-                    with open(export_path, 'w') as f:
+                    with io.StringIO() as f:
                         image_width = canvas.image_size.width()
                         image_height = canvas.image_size.height()
                         
-                        for shape in rotated_rect_shapes:
+                        for shape_index, shape in enumerate(rotated_rect_shapes):
+                            if shape_index % 256 == 0:
+                                checkpoint(self.main_window, tab, canvas)
                             if len(shape.pointslist) == 4:
                                 # 写入YOLO OBB格式: <class> <x1> <y1> <x2> <y2> <x3> <y3> <x4> <y4>
                                 points_str = ""
@@ -1324,22 +1093,29 @@ class BatchExporter:
                                     # 归一化坐标
                                     norm_x = point.x() / image_width
                                     norm_y = point.y() / image_height
-                                    points_str += f" {norm_x:.6f} {norm_y:.6f}"
+                                    points_str += f" {norm_x:.17g} {norm_y:.17g}"
                                     
                                 # 写入YOLO OBB格式的行
                                 f.write(f"{shape.classnum}{points_str}\n")
                                 
+                        content = f.getvalue()
+                        validate_rectangle_export(rotated_rect_shapes, content, 'rotated_rectangle',
+                                                  image_width, image_height, export_filename)
+                    checkpoint(self.main_window, tab, canvas)
+                    write_unique_text_atomic(rotated_rect_dir, export_filename, file_path, content)
                     exported_count += 1
+                except OperationCancelled:
+                    raise
                 except Exception as e:
                     print(f"Error exporting rotated rectangles from tab {tab_index + 1}: {str(e)}")
-                    skipped_count += 1
+                    failures.append(f"Tab {tab_index + 1} ({file_name}): {e}")
                 
                 # 更新进度
                 progress_dialog.setValue(tab_index + 1)
                 QtWidgets.QApplication.processEvents()  # 确保UI更新
                 
             # 恢复到原来的标签页
-            self.main_window.tabWidget.setCurrentIndex(current_tab_index)
+            # Original target restoration is handled by the batch session.
             
             # 关闭进度对话框
             progress_dialog.close()
@@ -1350,7 +1126,8 @@ class BatchExporter:
                     self.main_window,
                     "Export Complete",
                     f"Successfully exported rotated rectangle annotations from {exported_count} tabs.\n"
-                    f"Skipped {skipped_count} tabs (no rotated rectangle shapes).\n\n"
+                    f"Skipped {skipped_count} tabs (no rotated rectangle shapes or unavailable).\n"
+                    f"Failed to export {len(failures)} tabs.\n" + '\n'.join(failures) + "\n\n"
                     f"Files saved to: {rotated_rect_dir}"
                 )
             else:
@@ -1358,9 +1135,12 @@ class BatchExporter:
                     self.main_window,
                     "Export Complete",
                     f"No rotated rectangle annotations were exported.\n"
-                    f"All {skipped_count} tabs have no rotated rectangle shapes."
+                    f"{skipped_count} tabs have no rotated rectangle shapes or are unavailable.\n"
+                    f"Failed to export {len(failures)} tabs.\n" + '\n'.join(failures)
                 )
                 
+        except OperationCancelled:
+            raise
         except Exception as e:
             progress_dialog.close()
             QtWidgets.QMessageBox.critical(
@@ -1372,6 +1152,10 @@ class BatchExporter:
 # 在现有代码的最后添加
 
 class BatchImporter:
+    def import_points(self):
+        """Import Point annotations and images using the existing directory workflow."""
+        return batch_import_points(self.main_window, self._open_image)
+
     """
     Batch importer for annotations and corresponding images.
     Supports importing polygons, rectangles, and rotated rectangles.
@@ -1384,507 +1168,22 @@ class BatchImporter:
         """
         self.main_window = main_window
         
+    @annotation_batch(importing=True)
     def import_polygons(self):
-        """Import polygon annotations and corresponding images in batch"""
-        # Select image directory
-        image_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.main_window, "Select Image Directory", "",
-            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
-        )
-        
-        if not image_dir:
-            return
-            
-        # Select annotation directory
-        annotation_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.main_window, "Select Polygon Annotation Directory", "",
-            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
-        )
-        
-        if not annotation_dir:
-            return
-            
-        # Scan directories for images and annotation files - FIX: avoid duplicates
-        image_files = set()  # Use a set to avoid duplicates
-        for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tif']:
-            # Find files with both lowercase and uppercase extensions
-            found_files = glob.glob(os.path.join(image_dir, f"*{ext}"))
-            found_files.extend(glob.glob(os.path.join(image_dir, f"*{ext.upper()}")))
-            # Add to set to eliminate duplicates
-            image_files.update(found_files)
-        
-        # Convert back to list
-        image_files = list(image_files)
-        
-        annotation_files = glob.glob(os.path.join(annotation_dir, "*.txt"))
-        
-        if not image_files:
-            QtWidgets.QMessageBox.warning(
-                self.main_window,
-                "Import Error",
-                f"No image files found in the specified directory: {image_dir}"
-            )
-            return
-            
-        if not annotation_files:
-            QtWidgets.QMessageBox.warning(
-                self.main_window,
-                "Import Error",
-                f"No annotation files found in the specified directory: {annotation_dir}"
-            )
-            return
-        
-        # Create progress dialog
-        progress_dialog = QtWidgets.QProgressDialog("Importing images and annotations...", "Cancel", 0, len(image_files), self.main_window)
-        progress_dialog.setWindowTitle("Batch Import Progress")
-        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setValue(0)
-        
-        # Match images and annotations
-        matched_pairs = []
-        unmatched_images = []
-        unmatched_annotations = []
-        used_annotations = set()  # Keep track of used annotations
-        
-        # For each image, try to find a matching annotation file
-        for image_path in image_files:
-            image_name = os.path.splitext(os.path.basename(image_path))[0]
-            matching_annotation = None
-            
-            # Look for annotation file with matching name - FIX: use stricter matching
-            for annotation_path in annotation_files:
-                if annotation_path in used_annotations:
-                    continue  # Skip already used annotations
-                
-                annotation_name = os.path.splitext(os.path.basename(annotation_path))[0]
-                
-                # FIX: Use more exact matching - either exact match or specific pattern
-                # Either the annotation name contains the image name exactly (not as substring)
-                # or it follows a specific pattern like "prefix_imagename_suffix"
-                if (annotation_name == image_name or 
-                    annotation_name.endswith("_" + image_name) or
-                    annotation_name == "Polygon_Annotation_Batch_Exported_by_StomataQuant_" + image_name):
-                    matching_annotation = annotation_path
-                    used_annotations.add(annotation_path)  # Mark as used
-                    break
-            
-            if matching_annotation:
-                matched_pairs.append((image_path, matching_annotation))
-            else:
-                unmatched_images.append(image_path)
-        
-        # Find annotations without matching images
-        for annotation_path in annotation_files:
-            if annotation_path not in used_annotations:
-                unmatched_annotations.append(annotation_path)
-        
-        # Perform import operations
-        imported_count = 0
-        failed_imports = []
-        
-        for i, (image_path, annotation_path) in enumerate(matched_pairs):
-            # Check for user cancellation
-            if progress_dialog.wasCanceled():
-                break
-                
-            # Update progress
-            progress_dialog.setValue(i)
-            progress_dialog.setLabelText(f"Importing {i+1}/{len(matched_pairs)}: {os.path.basename(image_path)}")
-            
-            try:
-                # Open image
-                tab_index = self._open_image(image_path)
-                if tab_index >= 0:
-                    # Import annotation
-                    success = self._import_polygon_annotation(tab_index, annotation_path)
-                    if success:
-                        imported_count += 1
-                    else:
-                        failed_imports.append((image_path, annotation_path, "Annotation import failed"))
-                else:
-                    failed_imports.append((image_path, annotation_path, "Image open failed"))
-            except Exception as e:
-                failed_imports.append((image_path, annotation_path, f"Error: {str(e)}"))
-            
-            # Update progress
-            progress_dialog.setValue(i + 1)
-            QtWidgets.QApplication.processEvents()
-        
-        # Close progress dialog
-        progress_dialog.close()
-        
-        # Generate report
-        report = f"Polygon Annotation Batch Import Results:\n\n"
-        report += f"Images found: {len(image_files)}\n"
-        report += f"Annotation files found: {len(annotation_files)}\n"
-        report += f"Successfully matched pairs: {len(matched_pairs)}\n"
-        report += f"Successfully imported: {imported_count}\n\n"
-        
-        if unmatched_images:
-            report += f"Images without matching annotations ({len(unmatched_images)}):\n"
-            for path in unmatched_images[:10]:  # Show only first 10 to keep report manageable
-                report += f"  - {os.path.basename(path)}\n"
-            if len(unmatched_images) > 10:
-                report += f"  - ... and {len(unmatched_images) - 10} more files\n"
-            report += "\n"
-            
-        if unmatched_annotations:
-            report += f"Annotations without matching images ({len(unmatched_annotations)}):\n"
-            for path in unmatched_annotations[:10]:
-                report += f"  - {os.path.basename(path)}\n"
-            if len(unmatched_annotations) > 10:
-                report += f"  - ... and {len(unmatched_annotations) - 10} more files\n"
-            report += "\n"
-            
-        if failed_imports:
-            report += f"Failed imports ({len(failed_imports)}):\n"
-            for image_path, annotation_path, reason in failed_imports[:10]:
-                report += f"  - {os.path.basename(image_path)} - {reason}\n"
-            if len(failed_imports) > 10:
-                report += f"  - ... and {len(failed_imports) - 10} more file pairs\n"
-        
-        # Display report
-        QtWidgets.QMessageBox.information(
-            self.main_window,
-            "Batch Import Complete",
-            report
-        )
-    
+        from annotation_matching import run_import
+        return run_import(self, 'polygon')
+
+    @annotation_batch(importing=True)
     def import_rectangles(self):
-        """Import rectangle annotations and corresponding images in batch"""
-        # Select image directory
-        image_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.main_window, "Select Image Directory", "",
-            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
-        )
-        
-        if not image_dir:
-            return
-            
-        # Select annotation directory
-        annotation_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.main_window, "Select Rectangle Annotation Directory", "",
-            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
-        )
-        
-        if not annotation_dir:
-            return
-            
-        # Scan directories for images and annotation files - FIX: avoid duplicates
-        image_files = set()  # Use a set to avoid duplicates
-        for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tif']:
-            # Find files with both lowercase and uppercase extensions
-            found_files = glob.glob(os.path.join(image_dir, f"*{ext}"))
-            found_files.extend(glob.glob(os.path.join(image_dir, f"*{ext.upper()}")))
-            # Add to set to eliminate duplicates
-            image_files.update(found_files)
-        
-        # Convert back to list
-        image_files = list(image_files)
-        
-        annotation_files = glob.glob(os.path.join(annotation_dir, "*.txt"))
-        
-        if not image_files:
-            QtWidgets.QMessageBox.warning(
-                self.main_window,
-                "Import Error",
-                f"No image files found in the specified directory: {image_dir}"
-            )
-            return
-            
-        if not annotation_files:
-            QtWidgets.QMessageBox.warning(
-                self.main_window,
-                "Import Error",
-                f"No annotation files found in the specified directory: {annotation_dir}"
-            )
-            return
-        
-        # Create progress dialog
-        progress_dialog = QtWidgets.QProgressDialog("Importing images and annotations...", "Cancel", 0, len(image_files), self.main_window)
-        progress_dialog.setWindowTitle("Batch Import Progress")
-        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setValue(0)
-        
-        # Match images and annotations
-        matched_pairs = []
-        unmatched_images = []
-        unmatched_annotations = []
-        used_annotations = set()  # Keep track of used annotations
-        
-        # For each image, try to find a matching annotation file
-        for image_path in image_files:
-            image_name = os.path.splitext(os.path.basename(image_path))[0]
-            matching_annotation = None
-            
-            # Look for annotation file with matching name - FIX: use stricter matching
-            for annotation_path in annotation_files:
-                if annotation_path in used_annotations:
-                    continue  # Skip already used annotations
-                
-                annotation_name = os.path.splitext(os.path.basename(annotation_path))[0]
-                
-                # FIX: Use more exact matching - either exact match or specific pattern
-                # Either the annotation name contains the image name exactly (not as substring)
-                # or it follows a specific pattern like "prefix_imagename_suffix"
-                if (annotation_name == image_name or 
-                    annotation_name.endswith("_" + image_name) or
-                    annotation_name == "Rectangle_Annotation_Batch_Exported_by_StomataQuant_" + image_name):
-                    matching_annotation = annotation_path
-                    used_annotations.add(annotation_path)  # Mark as used
-                    break
-            
-            if matching_annotation:
-                matched_pairs.append((image_path, matching_annotation))
-            else:
-                unmatched_images.append(image_path)
-        
-        # Find annotations without matching images
-        for annotation_path in annotation_files:
-            if annotation_path not in used_annotations:
-                unmatched_annotations.append(annotation_path)
-        
-        # Perform import operations
-        imported_count = 0
-        failed_imports = []
-        
-        for i, (image_path, annotation_path) in enumerate(matched_pairs):
-            # Check for user cancellation
-            if progress_dialog.wasCanceled():
-                break
-                
-            # Update progress
-            progress_dialog.setValue(i)
-            progress_dialog.setLabelText(f"Importing {i+1}/{len(matched_pairs)}: {os.path.basename(image_path)}")
-            
-            try:
-                # Open image
-                tab_index = self._open_image(image_path)
-                if tab_index >= 0:
-                    # Import annotation
-                    success = self._import_rectangle_annotation(tab_index, annotation_path)
-                    if success:
-                        imported_count += 1
-                    else:
-                        failed_imports.append((image_path, annotation_path, "Annotation import failed"))
-                else:
-                    failed_imports.append((image_path, annotation_path, "Image open failed"))
-            except Exception as e:
-                failed_imports.append((image_path, annotation_path, f"Error: {str(e)}"))
-            
-            # Update progress
-            progress_dialog.setValue(i + 1)
-            QtWidgets.QApplication.processEvents()
-        
-        # Close progress dialog
-        progress_dialog.close()
-        
-        # Generate report
-        report = f"Rectangle Annotation Batch Import Results:\n\n"
-        report += f"Images found: {len(image_files)}\n"
-        report += f"Annotation files found: {len(annotation_files)}\n"
-        report += f"Successfully matched pairs: {len(matched_pairs)}\n"
-        report += f"Successfully imported: {imported_count}\n\n"
-        
-        if unmatched_images:
-            report += f"Images without matching annotations ({len(unmatched_images)}):\n"
-            for path in unmatched_images[:10]:
-                report += f"  - {os.path.basename(path)}\n"
-            if len(unmatched_images) > 10:
-                report += f"  - ... and {len(unmatched_images) - 10} more files\n"
-            report += "\n"
-            
-        if unmatched_annotations:
-            report += f"Annotations without matching images ({len(unmatched_annotations)}):\n"
-            for path in unmatched_annotations[:10]:
-                report += f"  - {os.path.basename(path)}\n"
-            if len(unmatched_annotations) > 10:
-                report += f"  - ... and {len(unmatched_annotations) - 10} more files\n"
-            report += "\n"
-            
-        if failed_imports:
-            report += f"Failed imports ({len(failed_imports)}):\n"
-            for image_path, annotation_path, reason in failed_imports[:10]:
-                report += f"  - {os.path.basename(image_path)} - {reason}\n"
-            if len(failed_imports) > 10:
-                report += f"  - ... and {len(failed_imports) - 10} more file pairs\n"
-        
-        # Display report
-        QtWidgets.QMessageBox.information(
-            self.main_window,
-            "Batch Import Complete",
-            report
-        )
-    
+        from annotation_matching import run_import
+        return run_import(self, 'rectangle')
+
+    @annotation_batch(importing=True)
     def import_rotated_rectangles(self):
-        """Import rotated rectangle annotations and corresponding images in batch"""
-        # Select image directory
-        image_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.main_window, "Select Image Directory", "",
-            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
-        )
-        
-        if not image_dir:
-            return
-            
-        # Select annotation directory
-        annotation_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self.main_window, "Select Rotated Rectangle Annotation Directory", "",
-            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
-        )
-        
-        if not annotation_dir:
-            return
-            
-        # Scan directories for images and annotation files - FIX: avoid duplicates
-        image_files = set()  # Use a set to avoid duplicates
-        for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tif']:
-            # Find files with both lowercase and uppercase extensions
-            found_files = glob.glob(os.path.join(image_dir, f"*{ext}"))
-            found_files.extend(glob.glob(os.path.join(image_dir, f"*{ext.upper()}")))
-            # Add to set to eliminate duplicates
-            image_files.update(found_files)
-        
-        # Convert back to list
-        image_files = list(image_files)
-        
-        annotation_files = glob.glob(os.path.join(annotation_dir, "*.txt"))
-        
-        if not image_files:
-            QtWidgets.QMessageBox.warning(
-                self.main_window,
-                "Import Error",
-                f"No image files found in the specified directory: {image_dir}"
-            )
-            return
-            
-        if not annotation_files:
-            QtWidgets.QMessageBox.warning(
-                self.main_window,
-                "Import Error",
-                f"No annotation files found in the specified directory: {annotation_dir}"
-            )
-            return
-        
-        # Create progress dialog
-        progress_dialog = QtWidgets.QProgressDialog("Importing images and annotations...", "Cancel", 0, len(image_files), self.main_window)
-        progress_dialog.setWindowTitle("Batch Import Progress")
-        progress_dialog.setWindowModality(QtCore.Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setValue(0)
-        
-        # Match images and annotations
-        matched_pairs = []
-        unmatched_images = []
-        unmatched_annotations = []
-        used_annotations = set()  # Keep track of used annotations
-        
-        # For each image, try to find a matching annotation file
-        for image_path in image_files:
-            image_name = os.path.splitext(os.path.basename(image_path))[0]
-            matching_annotation = None
-            
-            # Look for annotation file with matching name - FIX: use stricter matching
-            for annotation_path in annotation_files:
-                if annotation_path in used_annotations:
-                    continue  # Skip already used annotations
-                
-                annotation_name = os.path.splitext(os.path.basename(annotation_path))[0]
-                
-                # FIX: Use more exact matching - either exact match or specific pattern
-                # Either the annotation name contains the image name exactly (not as substring)
-                # or it follows a specific pattern like "prefix_imagename_suffix"
-                if (annotation_name == image_name or 
-                    annotation_name.endswith("_" + image_name) or
-                    annotation_name == "Rotated_Rectangle_Annotation_Batch_Exported_by_StomataQuant_" + image_name):
-                    matching_annotation = annotation_path
-                    used_annotations.add(annotation_path)  # Mark as used
-                    break
-            
-            if matching_annotation:
-                matched_pairs.append((image_path, matching_annotation))
-            else:
-                unmatched_images.append(image_path)
-        
-        # Find annotations without matching images
-        for annotation_path in annotation_files:
-            if annotation_path not in used_annotations:
-                unmatched_annotations.append(annotation_path)
-        
-        # Perform import operations
-        imported_count = 0
-        failed_imports = []
-        
-        for i, (image_path, annotation_path) in enumerate(matched_pairs):
-            # Check for user cancellation
-            if progress_dialog.wasCanceled():
-                break
-                
-            # Update progress
-            progress_dialog.setValue(i)
-            progress_dialog.setLabelText(f"Importing {i+1}/{len(matched_pairs)}: {os.path.basename(image_path)}")
-            
-            try:
-                # Open image
-                tab_index = self._open_image(image_path)
-                if tab_index >= 0:
-                    # Import annotation
-                    success = self._import_rotated_rectangle_annotation(tab_index, annotation_path)
-                    if success:
-                        imported_count += 1
-                    else:
-                        failed_imports.append((image_path, annotation_path, "Annotation import failed"))
-                else:
-                    failed_imports.append((image_path, annotation_path, "Image open failed"))
-            except Exception as e:
-                failed_imports.append((image_path, annotation_path, f"Error: {str(e)}"))
-            
-            # Update progress
-            progress_dialog.setValue(i + 1)
-            QtWidgets.QApplication.processEvents()
-        
-        # Close progress dialog
-        progress_dialog.close()
-        
-        # Generate report
-        report = f"Rotated Rectangle Annotation Batch Import Results:\n\n"
-        report += f"Images found: {len(image_files)}\n"
-        report += f"Annotation files found: {len(annotation_files)}\n"
-        report += f"Successfully matched pairs: {len(matched_pairs)}\n"
-        report += f"Successfully imported: {imported_count}\n\n"
-        
-        if unmatched_images:
-            report += f"Images without matching annotations ({len(unmatched_images)}):\n"
-            for path in unmatched_images[:10]:
-                report += f"  - {os.path.basename(path)}\n"
-            if len(unmatched_images) > 10:
-                report += f"  - ... and {len(unmatched_images) - 10} more files\n"
-            report += "\n"
-            
-        if unmatched_annotations:
-            report += f"Annotations without matching images ({len(unmatched_annotations)}):\n"
-            for path in unmatched_annotations[:10]:
-                report += f"  - {os.path.basename(path)}\n"
-            if len(unmatched_annotations) > 10:
-                report += f"  - ... and {len(unmatched_annotations) - 10} more files\n"
-            report += "\n"
-            
-        if failed_imports:
-            report += f"Failed imports ({len(failed_imports)}):\n"
-            for image_path, annotation_path, reason in failed_imports[:10]:
-                report += f"  - {os.path.basename(image_path)} - {reason}\n"
-            if len(failed_imports) > 10:
-                report += f"  - ... and {len(failed_imports) - 10} more file pairs\n"
-        
-        # Display report
-        QtWidgets.QMessageBox.information(
-            self.main_window,
-            "Batch Import Complete",
-            report
-        )
-    
+        from annotation_matching import run_import
+        return run_import(self, 'rotated_rectangle')
+
+
     def _open_image(self, file_path):
         """
         Open an image file and return its tab index
@@ -1900,29 +1199,20 @@ class BatchImporter:
             # Check if the file is already open
             for i in range(self.main_window.tabWidget.count()):
                 tab = self.main_window.tabWidget.widget(i)
-                if tab.property("file_path") == file_path:
+                if image_path_key(tab.property("file_path")) == image_path_key(file_path):
                     # Already open, return the index
                     return i
             
-            # Read the image
-            reader = QImageReader(file_path)
-            if reader.canRead():
-                image = reader.read()
-                pixmap = QPixmap.fromImage(image)
-                if pixmap.isNull():
-                    print(f"Cannot load image: {file_path}")
-                    return -1
-            else:
-                print(f"Cannot read image: {file_path}")
-                return -1
-
             # Create new tab
             tab = QWidget()
             tab.setProperty("file_path", file_path)
             
             # Create ImageGraphicsView
             graphics_view = ImageGraphicsView(tab)
-            graphics_view.load_image(file_path)
+            loaded, error = graphics_view.load_image(file_path)
+            if not loaded:
+                tab.deleteLater()
+                return -1
             
             # Set properties
             tab.setProperty("graphics_view", graphics_view)
@@ -1948,7 +1238,12 @@ class BatchImporter:
                 graphics_view.canvas.shapesChanged.connect(self.main_window.on_shapes_changed_in_canvas)
             
             # Switch to new tab
-            self.main_window.tabWidget.setCurrentIndex(tab_index)
+            session = getattr(self.main_window, '_annotation_batch', None)
+            if session:
+                session.last_new_tab = tab
+                session.track(graphics_view.canvas)
+            else:
+                self.main_window.tabWidget.setCurrentIndex(tab_index)
 
                         # 添加以下代码修复缩放问题
             # ------ 新增代码开始 ------
@@ -1956,7 +1251,8 @@ class BatchImporter:
             graphics_view.fit_to_view_custom()
             
             # 更新缩放信息显示
-            self.main_window.update_zoom_on_tab_change(tab_index)
+            if not session:
+                self.main_window.update_zoom_on_tab_change(tab_index)
             # ------ 新增代码结束 ------
             QtWidgets.QApplication.processEvents()  # Ensure UI updates
             
@@ -1965,330 +1261,52 @@ class BatchImporter:
             print(f"Error opening image: {e}")
             return -1
     
-    def _import_polygon_annotation(self, tab_index, annotation_path):
-        """
-        Import polygon annotations to the specified tab
-        
-        Args:
-            tab_index: Tab index where the annotation should be imported
-            annotation_path: Path to the annotation file
-            
-        Returns:
-            bool: True if import was successful, False otherwise
-        """
+    def _import_polygon_annotation(self, tab_index, annotation_path, replace=False):
+        return self._import_annotation(tab_index, annotation_path, 'polygon', replace)
+
+    def _import_rectangle_annotation(self, tab_index, annotation_path, replace=False):
+        return self._import_annotation(tab_index, annotation_path, 'rectangle', replace)
+
+    def _import_rotated_rectangle_annotation(self, tab_index, annotation_path, replace=False):
+        return self._import_annotation(tab_index, annotation_path, 'rotated_rectangle', replace)
+
+    def _import_annotation(self, tab_index, annotation_path, kind, replace=False):
+        from annotation_io import parse_import_lines, require_annotation_text
+        from point_annotations import commit_import
+        self.last_import_error = None
+        self.last_import_skipped = []
         try:
-            # Get tab and canvas
             tab = self.main_window.tabWidget.widget(tab_index)
-            if not tab:
-                return False
-                
-            graphics_view = tab.property("graphics_view")
-            if not graphics_view or not graphics_view.canvas:
-                return False
-                
-            canvas = graphics_view.canvas
-            
-            # Get image dimensions for normalization
-            image_width = canvas.image_size.width()
-            image_height = canvas.image_size.height()
-            
-            # Read the annotation file
-            with open(annotation_path, 'r') as f:
-                lines = f.readlines()
-            
-            # Parse and add shapes
-            shapes_added = 0
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                try:
-                    # Try to parse as YOLO polygon format: <class> <x1> <y1> <x2> <y2> ... <xn> <yn>
-                    parts = line.split()
-                    if len(parts) < 5:  # Need at least a class and 2 points (4 coords)
-                        continue
-                        
-                    # Extract class number
-                    classnum = int(parts[0])
-                    
-                    # Parse coordinates
-                    points = []
-                    for i in range(1, len(parts), 2):
-                        try:
-                            # Denormalize coordinates from YOLO format
-                            x = float(parts[i]) * image_width
-                            y = float(parts[i+1]) * image_height
-                            points.append(QPointF(x, y))
-                        except (ValueError, IndexError):
-                            continue
-                    
-                    if len(points) < 3:  # Polygons need at least 3 points
-                        continue
-                    
-                    # Get label based on class number
-                    label = f"class_{classnum}"
-                    
-                    # Assign group_id
-                    # Find the maximum group_id for shapes with the same classnum
-                    same_class_shapes = [s for s in canvas.shapes if s.classnum == classnum]
-                    group_id = 0
-                    if same_class_shapes:
-                        group_id = max(s.group_id for s in same_class_shapes) + 1
-                    
-                    # Create shape
-                    shape = Shape(
-                        label=label,
-                        classnum=classnum,
-                        pointslist=points,
-                        shape_type='polygon',
-                        group_id=group_id,
-                        scale_factor=canvas.scale_factor
-                    )
-                    
-                    # Add to canvas
-                    canvas.shapes.append(shape)
-                    shapes_added += 1
-                    
-                except Exception as e:
-                    print(f"Error parsing annotation line: {e}")
-                    continue
-            
-            # Update UI if shapes were added
-            if shapes_added > 0:
-                # Update canvas
-                canvas.update()
-                canvas.shapesChanged.emit()
-                
-                # Update UI elements
-                try:
-                    self.main_window.update_shapes_and_label_list()
-                except Exception as e:
-                    print(f"Error updating UI after import: {e}")
-                
-                return True
-                
-            return False
-            
-        except Exception as e:
-            print(f"Error importing polygon annotation: {e}")
-            return False
-    
-    def _import_rectangle_annotation(self, tab_index, annotation_path):
-        """
-        Import rectangle annotations to the specified tab
-        
-        Args:
-            tab_index: Tab index where the annotation should be imported
-            annotation_path: Path to the annotation file
-            
-        Returns:
-            bool: True if import was successful, False otherwise
-        """
-        try:
-            # Get tab and canvas
-            tab = self.main_window.tabWidget.widget(tab_index)
-            if not tab:
-                return False
-                
-            graphics_view = tab.property("graphics_view")
-            if not graphics_view or not graphics_view.canvas:
-                return False
-                
-            canvas = graphics_view.canvas
-            
-            # Get image dimensions for normalization
-            image_width = canvas.image_size.width()
-            image_height = canvas.image_size.height()
-            
-            # Read the annotation file
-            with open(annotation_path, 'r') as f:
-                lines = f.readlines()
-            
-            # Parse and add shapes
-            shapes_added = 0
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                try:
-                    # Try to parse as YOLO box format: <class> <center_x> <center_y> <width> <height>
-                    parts = line.split()
-                    if len(parts) != 5:
-                        continue
-                        
-                    # Extract class number
-                    classnum = int(parts[0])
-                    
-                    # Parse rectangle coordinates
-                    center_x = float(parts[1]) * image_width
-                    center_y = float(parts[2]) * image_height
-                    width = float(parts[3]) * image_width
-                    height = float(parts[4]) * image_height
-                    
-                    # Calculate top-left and bottom-right points
-                    x1 = center_x - width / 2
-                    y1 = center_y - height / 2
-                    x2 = center_x + width / 2
-                    y2 = center_y + height / 2
-                    
-                    # Create points for rectangle
-                    points = [QPointF(x1, y1), QPointF(x2, y2)]
-                    
-                    # Get label based on class number
-                    label = f"class_{classnum}"
-                    
-                    # Assign group_id
-                    # Find the maximum group_id for shapes with the same classnum
-                    same_class_shapes = [s for s in canvas.shapes if s.classnum == classnum]
-                    group_id = 0
-                    if same_class_shapes:
-                        group_id = max(s.group_id for s in same_class_shapes) + 1
-                    
-                    # Create shape
-                    shape = Shape(
-                        label=label,
-                        classnum=classnum,
-                        pointslist=points,
-                        shape_type='rectangle',
-                        group_id=group_id,
-                        scale_factor=canvas.scale_factor
-                    )
-                    
-                    # Add to canvas
-                    canvas.shapes.append(shape)
-                    shapes_added += 1
-                    
-                except Exception as e:
-                    print(f"Error parsing rectangle annotation line: {e}")
-                    continue
-            
-            # Update UI if shapes were added
-            if shapes_added > 0:
-                # Update canvas
-                canvas.update()
-                canvas.shapesChanged.emit()
-                
-                # Update UI elements
-                try:
-                    self.main_window.update_shapes_and_label_list()
-                except Exception as e:
-                    print(f"Error updating UI after import: {e}")
-                
-                return True
-                
-            return False
-            
-        except Exception as e:
-            print(f"Error importing rectangle annotation: {e}")
-            return False
-    
-    def _import_rotated_rectangle_annotation(self, tab_index, annotation_path):
-        """
-        Import rotated rectangle annotations to the specified tab
-        
-        Args:
-            tab_index: Tab index where the annotation should be imported
-            annotation_path: Path to the annotation file
-            
-        Returns:
-            bool: True if import was successful, False otherwise
-        """
-        try:
-            # Get tab and canvas
-            tab = self.main_window.tabWidget.widget(tab_index)
-            if not tab:
-                return False
-                
-            graphics_view = tab.property("graphics_view")
-            if not graphics_view or not graphics_view.canvas:
-                return False
-                
-            canvas = graphics_view.canvas
-            
-            # Get image dimensions for normalization
-            image_width = canvas.image_size.width()
-            image_height = canvas.image_size.height()
-            
-            # Read the annotation file
-            with open(annotation_path, 'r') as f:
-                lines = f.readlines()
-            
-            # Parse and add shapes
-            shapes_added = 0
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                try:
-                    # Try to parse as YOLO OBB format: <class> <x1> <y1> <x2> <y2> <x3> <y3> <x4> <y4>
-                    parts = line.split()
-                    if len(parts) != 9:  # Class + 4 points (8 coords)
-                        continue
-                        
-                    # Extract class number
-                    classnum = int(parts[0])
-                    
-                    # Parse coordinates for the 4 points of rotated rectangle
-                    points = []
-                    for i in range(1, 9, 2):
-                        # Denormalize coordinates from YOLO format
-                        x = float(parts[i]) * image_width
-                        y = float(parts[i+1]) * image_height
-                        points.append(QPointF(x, y))
-                    
-                    if len(points) != 4:  # Rotated rectangles need exactly 4 points
-                        continue
-                    
-                    # Get label based on class number
-                    label = f"class_{classnum}"
-                    
-                    # Assign group_id
-                    # Find the maximum group_id for shapes with the same classnum
-                    same_class_shapes = [s for s in canvas.shapes if s.classnum == classnum]
-                    group_id = 0
-                    if same_class_shapes:
-                        group_id = max(s.group_id for s in same_class_shapes) + 1
-                    
-                    # Create shape
-                    shape = Shape(
-                        label=label,
-                        classnum=classnum,
-                        pointslist=points,
-                        shape_type='rotated_rectangle',
-                        group_id=group_id,
-                        scale_factor=canvas.scale_factor
-                    )
-                    
-                    # Add to canvas
-                    canvas.shapes.append(shape)
-                    shapes_added += 1
-                    
-                except Exception as e:
-                    print(f"Error parsing rotated rectangle annotation line: {e}")
-                    continue
-            
-            # Update UI if shapes were added
-            if shapes_added > 0:
-                # Update canvas
-                canvas.update()
-                canvas.shapesChanged.emit()
-                
-                # Update UI elements
-                try:
-                    self.main_window.update_shapes_and_label_list()
-                except Exception as e:
-                    print(f"Error updating UI after import: {e}")
-                
-                return True
-                
-            return False
-            
-        except Exception as e:
-            print(f"Error importing rotated rectangle annotation: {e}")
+            canvas = require_target(self.main_window, tab)
+            original = list(canvas.shapes)
+            with open(annotation_path, encoding='utf-8-sig') as stream:
+                lines = stream.readlines()
+            require_annotation_text(lines)
+            width, height = canvas.image_size.width(), canvas.image_size.height()
+            check = lambda: checkpoint(self.main_window, tab, canvas)
+            valid, skipped = parse_import_lines(lines, kind, width, height, check,
+                                                with_labels=True)
+            next_ids, pending = {}, []
+            for number, category, points, label in valid:
+                if number % 256 == 1:
+                    check()
+                if category not in next_ids:
+                    ids = [shape.group_id for shape in ([] if replace else original) if shape.classnum == category]
+                    next_ids[category] = max(ids) + 1 if ids else 0
+                pending.append(Shape(label=label if label is not None else f'class_{category}',
+                                     classnum=category, pointslist=points,
+                                     shape_type=kind, group_id=next_ids[category], scale_factor=canvas.scale_factor))
+                next_ids[category] += 1
+            check()
+            require_target(self.main_window, tab, canvas)
+            commit_import(canvas, pending, replace=replace, expected=original)
+            self.last_import_count = len(pending)
+            self.last_import_skipped = skipped
+            if not getattr(self.main_window, '_defer_batch_refresh', False):
+                self.main_window.update_shapes_and_label_list()
+            return True
+        except OperationCancelled:
+            raise
+        except Exception as error:
+            self.last_import_error = str(error)
             return False

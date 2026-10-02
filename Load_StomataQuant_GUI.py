@@ -1,8 +1,33 @@
+import sys
+from macos_paths import macos_output_dir, macos_resource_path
+
+if sys.platform == 'darwin' and __name__ == '__main__' and getattr(sys, 'frozen', False):
+    # In a frozen .app, sys.executable is the app launcher rather than Python.
+    import multiprocessing
+    multiprocessing.freeze_support()
+    if len(sys.argv) > 1 and sys.argv[1] == '--stomataquant-worker':
+        from inference_worker import batch_main, main as inference_main
+        if len(sys.argv) == 4 and sys.argv[2] == '--batch':
+            batch_main(sys.argv[3])
+        elif len(sys.argv) == 4:
+            inference_main(sys.argv[2], sys.argv[3])
+        else:
+            raise ValueError('Invalid inference worker arguments.')
+        raise SystemExit(0)
+
+from annotation_io import (validate_polygon_export,
+                           validate_rectangle_export, parse_annotation_line, parse_rectangle_table_line,
+                           rectangle_table_header_index, import_warning,
+                           require_annotation_text)
+from annotation_session import snapshot as annotation_snapshot, save as save_annotation_session, load as load_annotation_session, session_path
 # -*- coding: utf-8 -*-
 import sys
 import os
+import io
+import math
 import ctypes
 import importlib.util  # 引入底层模块查找工具
+from pathlib import Path
 
 # 找到当前脚本所在目录 (也就是 app/src 目录)
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,7 +39,8 @@ PYTHON_ROOT = os.path.join(APP_ROOT, "python")
 LOCAL_SP = os.path.join(PYTHON_ROOT, "Lib", "site-packages")
 
 # ================= 环境嗅探：判断是打包环境还是开发环境 =================
-is_packaged_env = sys.executable.startswith(PYTHON_ROOT) and os.path.exists(PYTHON_ROOT)
+is_packaged_env = (sys.platform == 'win32' and sys.executable.startswith(PYTHON_ROOT)
+                   and os.path.exists(PYTHON_ROOT))
 
 if is_packaged_env:
     print("----------------------------------------------------------------")
@@ -49,65 +75,70 @@ else:
     if SRC_DIR not in sys.path:
         sys.path.insert(0, SRC_DIR)
 
-# ================= PyQt5 插件及底层依赖配置 (终极自适应版) =================
-def get_safe_windows_path(path):
-    if not sys.platform.startswith("win"):
+if sys.platform == 'win32':
+    # ================= PyQt5 插件及底层依赖配置 (终极自适应版) =================
+    def get_safe_windows_path(path):
+        if not sys.platform.startswith("win"):
+            return path
+        try:
+            buf_size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
+            if buf_size > 0:
+                buf = ctypes.create_unicode_buffer(buf_size)
+                ctypes.windll.kernel32.GetShortPathNameW(path, buf, buf_size)
+                return buf.value
+        except Exception as e:
+            print(f"短路径转换失败，回退原路径: {e}")
         return path
-    try:
-        buf_size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
-        if buf_size > 0:
-            buf = ctypes.create_unicode_buffer(buf_size)
-            ctypes.windll.kernel32.GetShortPathNameW(path, buf, buf_size)
-            return buf.value
-    except Exception as e:
-        print(f"短路径转换失败，回退原路径: {e}")
-    return path
 
-# 清理旧环境变量
-if 'QT_PLUGIN_PATH' in os.environ:
-    del os.environ['QT_PLUGIN_PATH']
-if 'QT_QPA_PLATFORM_PLUGIN_PATH' in os.environ:
-    del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
+    # 清理旧环境变量
+    if 'QT_PLUGIN_PATH' in os.environ:
+        del os.environ['QT_PLUGIN_PATH']
+    if 'QT_QPA_PLATFORM_PLUGIN_PATH' in os.environ:
+        del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
 
-# 【核心修复】：智能探测是 Qt5 还是 Qt 文件夹！
+    # 【核心修复】：智能探测是 Qt5 还是 Qt 文件夹！
 
-pyqt5_spec = importlib.util.find_spec('PyQt5')
-raw_plugin_path = ""
+    pyqt5_spec = importlib.util.find_spec('PyQt5')
+    raw_plugin_path = ""
 
-if pyqt5_spec and pyqt5_spec.submodule_search_locations:
-    pyqt5_dir = pyqt5_spec.submodule_search_locations[0]
+    if pyqt5_spec and pyqt5_spec.submodule_search_locations:
+        pyqt5_dir = pyqt5_spec.submodule_search_locations[0]
     
-    # 路径 A: 标准 Pip 安装路径 (新版)
-    p_pip_new = os.path.join(pyqt5_dir, 'Qt5', 'plugins')
-    # 路径 B: 标准 Pip 安装路径 (旧版)
-    p_pip_old = os.path.join(pyqt5_dir, 'Qt', 'plugins')
-    # 路径 C: 你现在的 Anaconda 环境路径 (关键！)
-    # 它在 site-packages 的上两级目录下的 Library/plugins
-    p_conda = os.path.abspath(os.path.join(pyqt5_dir, "..", "..", "..", "Library", "plugins"))
+        # 路径 A: 标准 Pip 安装路径 (新版)
+        p_pip_new = os.path.join(pyqt5_dir, 'Qt5', 'plugins')
+        # 路径 B: 标准 Pip 安装路径 (旧版)
+        p_pip_old = os.path.join(pyqt5_dir, 'Qt', 'plugins')
+        # 路径 C: 你现在的 Anaconda 环境路径 (关键！)
+        # 它在 site-packages 的上两级目录下的 Library/plugins
+        p_conda = os.path.abspath(os.path.join(pyqt5_dir, "..", "..", "..", "Library", "plugins"))
 
-    if os.path.exists(p_pip_new):
-        raw_plugin_path = p_pip_new
-    elif os.path.exists(p_pip_old):
-        raw_plugin_path = p_pip_old
-    elif os.path.exists(p_conda):
-        raw_plugin_path = p_conda
+        if os.path.exists(p_pip_new):
+            raw_plugin_path = p_pip_new
+        elif os.path.exists(p_pip_old):
+            raw_plugin_path = p_pip_old
+        elif os.path.exists(p_conda):
+            raw_plugin_path = p_conda
 
-# 如果上面都没搜到（比如打包环境），再使用兜底路径
-if not raw_plugin_path:
-    raw_plugin_path = os.path.join(LOCAL_SP, "PyQt5", "Qt5", "plugins")
+    # 如果上面都没搜到（比如打包环境），再使用兜底路径
+    if not raw_plugin_path:
+        raw_plugin_path = os.path.join(LOCAL_SP, "PyQt5", "Qt5", "plugins")
 
 
-# 获取短路径别名
-safe_plugin_path = get_safe_windows_path(raw_plugin_path)
-safe_platforms_path = os.path.join(safe_plugin_path, 'platforms')
+    # 获取短路径别名
+    safe_plugin_path = get_safe_windows_path(raw_plugin_path)
+    safe_platforms_path = os.path.join(safe_plugin_path, 'platforms')
 
-# 关键防错拦截：确保探测到的路径确实存在，再交给环境变量
-if os.path.exists(safe_plugin_path):
-    os.environ['QT_PLUGIN_PATH'] = safe_plugin_path
-    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = safe_platforms_path
-    print(f"============================== 成功挂载 QT_PLUGIN_PATH: {os.environ['QT_PLUGIN_PATH']}")
-else:
-    print(f"【严重警告】：插件路径不存在！{safe_plugin_path}")
+    # 关键防错拦截：确保探测到的路径确实存在，再交给环境变量
+    if os.path.exists(safe_plugin_path):
+        os.environ['QT_PLUGIN_PATH'] = safe_plugin_path
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = safe_platforms_path
+        print(f"============================== 成功挂载 QT_PLUGIN_PATH: {os.environ['QT_PLUGIN_PATH']}")
+    else:
+        print(f"【严重警告】：插件路径不存在！{safe_plugin_path}")
+
+elif sys.platform == 'darwin':
+    # PyQt5 or the .app packager discovers the Cocoa plugin.
+    pass
 
 # ================= 现在才可以安全导入 PyQt5 =================
 from PyQt5.QtCore import Qt, QTimer, QEventLoop, QPluginLoader, QCoreApplication, QtMsgType, qInstallMessageHandler
@@ -115,7 +146,7 @@ from PyQt5.QtGui import QImageReader
 import PyQt5
 
 # 强行将正确的安全路径写入 PyQt5 核心
-if os.path.exists(safe_plugin_path):
+if sys.platform == 'win32' and os.path.exists(safe_plugin_path):
     QCoreApplication.addLibraryPath(safe_plugin_path)
 
 print("The loaded library path：", QCoreApplication.libraryPaths())
@@ -131,7 +162,7 @@ import tempfile
 import json
 import time
 from collections import defaultdict
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal, QThread,QFile, QIODevice
 from PyQt5.QtGui import (QFont, QImage, QKeySequence, QPixmap, QTransform)
 from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox,
@@ -140,14 +171,24 @@ from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel, QLineEd
 
 # 导入自定义模块 Import custom modules
 from StomataQuant_GUI import MainWindow
+from toolbar_ui import style_button
 from ultralytics import YOLO
-from AllDialogs import InferenceSettingsDialog,SetMeasuringScaleDialog,LabelInputDialog,ProgressDialog,ColorSettingsDialog,HeatMapDialog,BatchProcessingDialog,BatchProgressDialog
+from AllDialogs import InferenceSettingsDialog,SetMeasuringScaleDialog,LabelInputDialog,ProgressDialog,DisplaySettingsDialog,HeatMapDialog,BatchProcessingDialog,BatchProgressDialog
 from ImageGraphicsView import ImageGraphicsView
 from shape import *
+from measurements import resolve_scale, ensure_features, refresh_shapes, apply_scale, positive_number
+from measurement_controller import MeasurementController
 from canvas import Canvas, USE_NUMBA, check_numba,process_polygon_data
 from dock_widgets import ShapeListDock, LabelListDock,MeasuredResultsDock,ImageResultsSummaryDock
 from InferenceThread import YOLOSegInferenceThread,PolygonProcessThread,ABorADInferenceThread, HeatMapGenerationThread
 from BatchProcessor import BatchProcessor, BatchExporter, BatchImporter, BatchFeatureExporter
+import display_settings as display
+from point_annotations import (write_points, import_points,
+                               require_target, refresh_point_import, import_checkpoint)
+from task_support import task_manager, OperationCancelled
+from inference_support import decode_predictions, shapes_from_predictions, save_polygon_audit
+from safe_io import write_text_atomic, source_suffix
+from geometry import minimum_rectangle_size
 import resources_rc
 #############################################################################################################
 # UIMainWindow
@@ -155,12 +196,24 @@ import resources_rc
 #############################################################################################################
 
 class UIMainWindow(MainWindow):
+    metadataCommit = QtCore.pyqtSignal(object, str, str)
     def __init__(self):
         super().__init__()
         if not check_numba():
-            USE_NUMBA = False
+            import canvas as canvas_module
+            canvas_module.USE_NUMBA = False
             print("Numba is unavailable and acceleration has been disabled.")
         self.setupUi(self)
+        self._discard_unsaved_for_session = False
+        self._open_dropped_images_for_session = False
+        self._drop_annotation_mode_for_session = None
+        self.setAcceptDrops(True)
+        self.tabWidget.setAcceptDrops(True)
+        self.tabWidget.installEventFilter(self)
+        self.tabWidget.tabBar().setAcceptDrops(True)
+        self.tabWidget.tabBar().installEventFilter(self)
+        self.load_color_settings()
+        display.set_current(display.load(QtCore.QSettings("StomaQuant", "GUI")))
         self._noShapeListSelectionSlot = False
         self._noCanvasSelectionSlot = False
         # 添加全局状态变量控制 group_id 是否显示
@@ -171,6 +224,8 @@ class UIMainWindow(MainWindow):
         self.image_results_summary_dock = ImageResultsSummaryDock(self)
         self.addDockWidget(Qt.RightDockWidgetArea, self.image_results_summary_dock)
         self.measured_results_dock = MeasuredResultsDock(self)
+        self.measurement_controller = MeasurementController(self)
+        self.measured_results_dock.shapeSelectionChanged.connect(self.on_shape_selected_in_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.measured_results_dock)
         # 初始化 ShapeListDock
         self.shapedockinstance = ShapeListDock(self)
@@ -182,8 +237,9 @@ class UIMainWindow(MainWindow):
         self.actionHeatMap.triggered.connect(self.show_heatmap)
         # 菜单栏按钮
         # 链接Open 按钮到open_file
-        self.actionColorSettings.triggered.connect(self.show_color_settings)
+        self.actionDisplaySettings.triggered.connect(self.show_display_settings)
         self.actionOpen.triggered.connect(self.open_file)
+        self.actionOpenFolder.triggered.connect(self.open_folder)
         self.opened_files = []  # 以跟踪打开的文件，防止重复添加文件
         ## 链接到保存按钮
         self.actionSavePolygonAnnotataion.triggered.connect(self.save_polygon_annotation)
@@ -192,12 +248,15 @@ class UIMainWindow(MainWindow):
         self.actionImportRectangleAnnotataion.triggered.connect(self.import_rectangle)
         self.actionSaveRotatedRectangleAnnotataion.triggered.connect(self.save_rotated_rectangle_annotation)
         self.actionImportRotatedRectangleAnnotataion.triggered.connect(self.import_rotated_rectangle)
+        self.actionSavePointAnnotataion.triggered.connect(self.save_point_annotation)
+        self.actionImportPointAnnotataion.triggered.connect(self.import_point)
         self.actionShowPoint.triggered.connect(self.show_points)
         self.actionShowID.triggered.connect(self.draw_group_id)
 
         # 链接到模型选择
         self.actionModelSetting.triggered.connect(self.load_model)  
         self.model = None  # Initialize the model attribute
+        self.update_model_status()
         # 链接到推理设置
         self.actionInferenceSetting.triggered.connect(self.show_inference_settings)  # Connect to show inference settings
         self.inference_settings = {}  # Initialize inference settings attribute
@@ -217,6 +276,7 @@ class UIMainWindow(MainWindow):
         # 切换标签或者关闭标签
         # 切换标签链接到 on_tab_changed_and_update_zoom_and_list
         self.tabWidget.currentChanged.connect(self.on_tab_changed_and_update_zoom_and_list)
+        self.tabWidget.currentChanged.connect(self.update_image_status)
         self.tabWidget.tabCloseRequested.connect(self.close_tab)
 
         # # 链接shapedockinstance中选中某个列信号到on_shape_selected_in_dock
@@ -224,49 +284,29 @@ class UIMainWindow(MainWindow):
         
         # 链接shapedockinstance中可视性更改信号到update_canvas
         self.shapedockinstance.visibilityChanged.connect(self.update_canvas)
+        self.shapedockinstance.pointClassChanged.connect(self.change_point_class)
+        self.shapedockinstance.metadataEdited.connect(self._queue_metadata_edit)
+        self.labeldockinstance.metadataEdited.connect(self._queue_metadata_edit)
+        self.metadataCommit.connect(self._apply_metadata_edit, Qt.QueuedConnection)
         # 链接labeldockinstance中可视性更改信号到on_label_visibility_changed
         self.labeldockinstance.visibilityChanged.connect(self.on_label_visibility_changed)
         # 连接动作
         self.actionGetMER.triggered.connect(self.Get_MER_on_Canvas)
-        self.actionFeatureExtraction.triggered.connect(self.feature_extraction_of_all_shapes)
         self.actionDuplicate.triggered.connect(self.duplicate_shape)
 
-        self.backspace_shortcut = QShortcut(QKeySequence("Backspace"), self)
-        self.backspace_shortcut.activated.connect(self.delete_selected_shape)
-        self.delete_shortcut = QShortcut(QKeySequence("Delete"), self)
-        self.delete_shortcut.activated.connect(self.delete_selected_shape)
-        self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
-        self.copy_shortcut.activated.connect(self.duplicate_shape)
-        self.revoke_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
-        self.revoke_shortcut.activated.connect(self.undo)
-        self.space_shortcut = QShortcut(QKeySequence("Ctrl+Space"), self)
-        self.space_shortcut.activated.connect(self.fit_to_view)
-        
-        
-        self.featureextract_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
-        self.featureextract_shortcut.activated.connect(self.feature_extraction_of_all_shapes)
-        # self.getmer_shortcut = QShortcut(QKeySequence("Ctrl+G"), self)
-        # self.getmer_shortcut.activated.connect(self.Get_MER_on_Canvas)
-        self.ai_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
-        self.ai_shortcut.activated.connect(self.run_YOLO_seg_inference)
-        
-        # 添加这些新快捷键
-        self.ctrl_shift_delete_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Delete"), self)
-        self.ctrl_shift_delete_shortcut.activated.connect(self.delete_all_shapes)
-        self.ctrl_shift_backspace_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Backspace"), self)
-        self.ctrl_shift_backspace_shortcut.activated.connect(self.delete_all_shapes)
+        self.actionUndo.setShortcut(QKeySequence('Ctrl+Z'))
+        self.actionUndo.setToolTip('Undo (Ctrl+Z)')
+        self.actionUndo.setIcon(self._history_icon(False))
+        self.actionRedo = QtWidgets.QAction('Redo', self)
+        self.actionRedo.setShortcut(QKeySequence('Ctrl+Y'))
+        self.actionRedo.setToolTip('Redo (Ctrl+Y)')
+        self.actionRedo.setIcon(self._history_icon(True))
+        self.actionRedo.setEnabled(False)
+        self.toolBar.insertAction(self.historySeparator, self.actionRedo)
+        style_button(self.toolBar.widgetForAction(self.actionRedo), icon_only=True)
+        self.actionRedo.triggered.connect(self.redo)
+        self.actionEditShapes.setToolTip('Edit Shapes (Alt+click cycles overlapping shapes)')
 
-        # 添加批处理快捷键
-        self.batch_processing_shortcut = QShortcut(QKeySequence("Ctrl+B"), self)
-        self.batch_processing_shortcut.activated.connect(self.batch_processing)
-
-        
-        self.selectmodel_shortcut = QShortcut(QKeySequence("Ctrl+M"), self)
-        self.selectmodel_shortcut.activated.connect(self.load_model)
-
-        self.openfile_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
-        self.openfile_shortcut.activated.connect(self.open_file)
-        
         self.actionDelete.triggered.connect(self.delete_selected_shape)
         self.actionDeleteAllShapes.triggered.connect(self.delete_all_shapes)
         self.actionUndo.triggered.connect(self.undo)
@@ -297,6 +337,8 @@ class UIMainWindow(MainWindow):
         self.actionBatchImportPolygon.triggered.connect(self.batch_import_polygon)
         self.actionBatchImportRectangle.triggered.connect(self.batch_import_rectangle)
         self.actionBatchImportRotatedRectangle.triggered.connect(self.batch_import_rotated_rectangle)
+        self.actionBatchExportPoint.triggered.connect(self.batch_export_point)
+        self.actionBatchImportPoint.triggered.connect(self.batch_import_point)
         
         self.actionExportPolygonFeature.triggered.connect(lambda: self.batch_export_features('polygon'))
         self.actionExportRotatedRectangleFeature.triggered.connect(lambda: self.batch_export_features('rotated_rectangle'))
@@ -306,6 +348,8 @@ class UIMainWindow(MainWindow):
                 # 在__init__方法的末尾添加
         self.actionShortcutHelp.triggered.connect(self.show_shortcut_help)
         self.actionSeeHelp.triggered.connect(self.show_help)
+        from keyboard_shortcuts import ShortcutController
+        self._shortcut_controller = ShortcutController(self)
     
     def batch_export_features(self, shape_type):
         """
@@ -330,109 +374,26 @@ class UIMainWindow(MainWindow):
             QMessageBox.warning(self, "Failed to open browser", f"Cannot open the default browser: {str(e)}, please visit {github_url} manually.")
     
     def show_shortcut_help(self):
-        """显示所有可用的键盘快捷键，使用非模态窗口"""
-        # 如果已经存在快捷键窗口，则显示它
+        from keyboard_shortcuts import ShortcutHelpDialog
         if hasattr(self, 'shortcut_dialog') and self.shortcut_dialog.isVisible():
             self.shortcut_dialog.raise_()
             self.shortcut_dialog.activateWindow()
             return
-        
-        # 创建一个非模态对话框
-        self.shortcut_dialog = QtWidgets.QDialog(self)
-        self.shortcut_dialog.setWindowTitle("Keyboard Shortcuts")
-        self.shortcut_dialog.setWindowFlags(
-            QtCore.Qt.Window | 
-            QtCore.Qt.WindowStaysOnTopHint | 
-            QtCore.Qt.WindowCloseButtonHint
-        )
-        
-        # 设置大小和位置
-        self.shortcut_dialog.resize(500, 600)
-        # 居中显示在主窗口上
-        center_point = self.geometry().center()
-        dialog_rect = self.shortcut_dialog.geometry()
-        dialog_rect.moveCenter(center_point)
-        self.shortcut_dialog.setGeometry(dialog_rect)
-        
-        # 创建布局
-        layout = QtWidgets.QVBoxLayout(self.shortcut_dialog)
-        
-        # 设置快捷键文本
-        shortcut_text = """
-    <h3>Keyboard Shortcuts</h3>
-    <table border="0" cellspacing="10">
-        <tr><th colspan="2" align="left">File Operations</th></tr>
-        <tr>
-            <td><b>Ctrl+O</b></td>
-            <td>Open File</td>
-        </tr>
-        
-        <tr><th colspan="2" align="left">Analysis & Processing</th></tr>
-        <tr>
-            <td><b>Ctrl+F</b></td>
-            <td>Feature Extraction</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl+I</b></td>
-            <td>Run AI Inference</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl+M</b></td>
-            <td>Select Model</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl+B</b></td>
-            <td>Batch Processing</td>
-        </tr>
-
-        <tr><th colspan="2" align="left">Shape Operations</th></tr>
-        <tr>
-            <td><b>Ctrl+Z</b></td>
-            <td>Undo Operation</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl+C</b></td>
-            <td>Copy/Clone Selected Shape</td>
-        </tr>
-        <tr>
-            <td><b>Delete</b> / <b>Backspace</b></td>
-            <td>Delete Selected Shape</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl+Shift+Delete</b> / <b>Ctrl+Shift+Backspace</b></td>
-            <td>Delete All Shapes</td>
-        </tr>
-        
-        <tr><th colspan="2" align="left">View Controls</th></tr>
-        <tr>
-            <td><b>Ctrl+Space</b></td>
-            <td>Fit to View</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl+Mouse Wheel</b></td>
-            <td>Zoom In/Out</td>
-        </tr>
-        <tr>
-            <td><b>Ctrl++</b> / <b>Ctrl+-</b></td>
-            <td>Zoom In/Out</td>
-        </tr>
-    </table>
-    """
-        # 使用QTextBrowser以支持富文本和滚动条
-        text_browser = QtWidgets.QTextBrowser()
-        text_browser.setHtml(shortcut_text)
-        text_browser.setOpenExternalLinks(True)
-        layout.addWidget(text_browser)
-        
-        # 添加关闭按钮（可选）
-        close_button = QtWidgets.QPushButton("Close")
-        close_button.clicked.connect(self.shortcut_dialog.close)
-        layout.addWidget(close_button)
-        
-        # 显示对话框(非模态)
+        self.shortcut_dialog = ShortcutHelpDialog(self, self._shortcut_controller.rows())
         self.shortcut_dialog.show()
-    #批量导入
-    # 修改批量导入方法如下:
+
+    def batch_import_point(self):
+        try:
+            return BatchImporter(self).import_points()
+        except Exception as error:
+            QMessageBox.critical(self, 'Batch import error', f'Failed to import Point annotations: {error}')
+
+    def batch_export_point(self):
+        try:
+            return BatchExporter(self).export_points()
+        except Exception as error:
+            QMessageBox.critical(self, 'Export error', f'Failed to export Point annotations: {error}')
+
     def batch_import_polygon(self):
         """批量导入多边形标注和对应图像"""
         try:
@@ -499,18 +460,14 @@ class UIMainWindow(MainWindow):
     
     def batch_processing(self):
         """调用批处理器处理所有打开的标签页"""
-        # 检查是否已加载模型（如果需要运行AI功能）
-        if hasattr(self, 'model') and self.model:
-            try:
-                processor = BatchProcessor(self)
-                processor.process()
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Error during batch processing: {e}")
-        else:
-            QMessageBox.warning(self, "Notice", "Please load a model first.")
+        if self.tabWidget.count() < 2:
+            QMessageBox.warning(self, 'Batch Processing',
+                                'Batch Processing requires at least two open images/tabs.')
             return
-        
-
+        try:
+            BatchProcessor(self).process()
+        except Exception as error:
+            QMessageBox.warning(self, 'Error', f'Error during batch processing: {error}')
 
     ### 功能实现，关闭程序 terminate the program
     def close_application(self):
@@ -522,7 +479,7 @@ class UIMainWindow(MainWindow):
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            QApplication.instance().quit()
+            self.close()
 
     ### 启动Edit模式，控制其他按钮开启还是关闭
     ### Start the Edit mode and control whether other buttons are enabled or disabled.
@@ -531,7 +488,6 @@ class UIMainWindow(MainWindow):
             currentshapes = self.get_current_shapes()
             has_shapes = bool(self.get_current_shapes())
             self.actionDeleteAllShapes.setEnabled(has_shapes)
-            self.actionFeatureExtraction.setEnabled(has_shapes)
             has_polygons = any([s.shape_type == "polygon" for s in self.get_current_shapes()])
             self.actionGetMER.setEnabled(has_polygons)
 
@@ -555,74 +511,99 @@ class UIMainWindow(MainWindow):
     ### 比例尺设置按键 关于比例尺的设置
     ### Regarding the Setting of Scale
     def set_measuring_scale(self):
-        dialog = SetMeasuringScaleDialog(self)
-        if dialog.exec_():
-            pixel_distance, real_distance, unit, is_global = dialog.get_scale_info()
-
-            if pixel_distance == 0:
-                QMessageBox.warning(self, "Notice", "The pixel distance cannot be zero.")
-                return
-            
-            scale = real_distance / pixel_distance  # 每像素对应的实际长度
-            scale_info = {'scale': scale, 'unit': unit}
-            if is_global:
-                self.global_scale_info = scale_info
-            else:
-                current_view = self.get_current_graphics_view()
-                if current_view:
-                    current_view.scale_info = scale_info
+        SetMeasuringScaleDialog(self).exec_()
 
     ###“Feature Extraction”按键所连接的功能： 关于各种形状的特征提取，主要依赖于shape中定义的方法
     ### The function connected by the "Feature Extraction" button:
     # Regarding the feature extraction of various shapes, it mainly relies on the methods defined in the "shape" section.
-    def feature_extraction_of_all_shapes(self):
-        get_current_shapes = self.get_current_shapes()
-        visible_shapes = [s for s in get_current_shapes if s.visible]
-                # 获取比例尺信息
-        current_view = self.get_current_graphics_view()
-        canvas = current_view.canvas
-        image_size = canvas.image_size
-        image_width = image_size.width()
-        image_height = image_size.height()
+    def refresh_measurements(self, force=False):
+        if getattr(self, '_defer_batch_refresh', False):
+            return
+        view = self.get_current_graphics_view()
+        canvas = view.canvas if view else None
+        self.measurement_controller.bind(canvas)
+        if canvas is None:
+            return
+        if getattr(canvas, '_edit_before', None) is not None:
+            self.schedule_measurement_refresh()
+            return
+        if hasattr(self, '_measurement_timer'):
+            self._measurement_timer.stop()
+        if (getattr(self, '_drop_batch_background', False)
+                or canvas in self.measurement_controller.batch_managed):
+            self.measurement_controller.enqueue_batch_tab(self.tabWidget.currentWidget())
+            return
+        self.measurement_controller.refresh(
+            canvas, resolve_scale(self, view), force,
+            background=getattr(self, '_drop_batch_background', False))
 
-        if hasattr(self, 'global_scale_info'):
-            scale_info = self.global_scale_info
-        else:
-            current_view = self.get_current_graphics_view()
-            if current_view and hasattr(current_view, 'scale_info'):
-                scale_info = current_view.scale_info
-            else:
-                scale_info = None  # 如果没有设置比例尺，则为 None
-    
+    def measurements_ready_for_export(self):
+        """Wait responsively for complete current results; cancellation aborts export."""
+        self.refresh_measurements()
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return False
+        canvas = view.canvas
+        state = self.measurement_controller.state(canvas)
+        while state.job is not None or getattr(state, 'project', ()):
+            QtWidgets.QApplication.processEvents()
+            if sip.isdeleted(canvas) or self.get_current_graphics_view() is not view or view.canvas is not canvas:
+                return False
+            time.sleep(.001)
+        return self.measurement_controller.ready(canvas)
 
-        for s in visible_shapes:
-            if s.shape_type == "polygon":
-                s.feature_extraction_polygon(scale_info=scale_info)
-            if s.shape_type == "rectangle":
-                s.feature_extraction_rectangle(scale_info=scale_info)
-            if s.shape_type == "rotated_rectangle":
-                s.feature_extraction_rotated_rectangle(scale_info=scale_info)
-            if s.shape_type == "line":
-                s.feature_extraction_line(scale_info=scale_info)
-            if s.shape_type == "point":
-                s.feature_extraction_point(scale_info=scale_info)
-
-
-        # # 清空当前的 QTableWidget
-        # self.measured_results_dock.populate([])
-        # # 提供默认的 image_width 和 image_height
-        # self.image_results_summary_dock.populate([], 0, 0, None)
-        # 填充 QTableWidget
-        self.measured_results_dock.populate(visible_shapes)
-        self.image_results_summary_dock.populate(visible_shapes, image_width, image_height, scale_info)
+    def schedule_measurement_refresh(self):
+        if getattr(self, '_defer_batch_refresh', False):
+            return
+        if not hasattr(self, '_measurement_timer'):
+            self._measurement_timer = QTimer(self)
+            self._measurement_timer.setSingleShot(True)
+            self._measurement_timer.timeout.connect(self.refresh_measurements)
+        self._measurement_timer.start(75)
 
     ### GETMER按钮-可以获得多边形的最小外接矩形MER，
     ### 主要使用了shape中定义的calculate_minimum_rotated_rectangle方法
     ### GETMER Button - It can obtain the minimum enclosing rectangle of a polygon MER.
     ### It mainly utilizes the calculate_minimum_rotated_rectangle method defined in the shape module.
+    def _collect_shape_batch(self, canvas, title, calculate, minimum=256):
+        """Collect results while pumping Qt; publish only after an uncancelled scan."""
+        shapes = list(canvas.shapes)
+        progress = None
+        if len(shapes) >= minimum:
+            progress = QProgressDialog(title, 'Cancel', 0, len(shapes), self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.show()
+        tab = self.tabWidget.currentWidget()
+        values = []
+        try:
+            for index, shape in enumerate(shapes):
+                if progress is not None and index % 32 == 0:
+                    progress.setValue(index)
+                    QApplication.processEvents()
+                    if (progress.wasCanceled() or sip.isdeleted(canvas)
+                            or self.tabWidget.indexOf(tab) < 0
+                            or tab.property('graphics_view').canvas is not canvas
+                            or self.tabWidget.currentWidget() is not tab):
+                        return None
+                values.append(calculate(shape))
+            if progress is not None:
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    return None
+            return values
+        finally:
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+
     def Get_MER_on_Canvas(self):
         # 目前仅有长宽的测定
-        canvas = self.get_current_graphics_view().canvas
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return
+        canvas = view.canvas
         has_rotated_rect = any(s.shape_type == "rotated_rectangle" for s in canvas.shapes)
         has_polygon = any(s.shape_type == "polygon" for s in canvas.shapes)
         
@@ -638,14 +619,18 @@ class UIMainWindow(MainWindow):
                 return  # 用户选择不继续
             
 
-        new_shapes = []
-        for shape in canvas.shapes:
-            if shape.visible and shape.shape_type == "polygon":
-            # 调用修改后的方法，获取新形状
-                rotated_rect_shape = shape.calculate_minimum_rotated_rectangle()
-                if rotated_rect_shape:
-                    new_shapes.append(rotated_rect_shape)
+        prepared = self._collect_shape_batch(
+            canvas, 'Generating MER...',
+            lambda shape: shape.calculate_minimum_rotated_rectangle(
+                minimum_rectangle_size(canvas.image_size.width(), canvas.image_size.height()))
+            if shape.visible and shape.shape_type == 'polygon' else None, 64)
+        if prepared is None:
+            return
+        new_shapes = [shape for shape in prepared if shape is not None]
         # 将新形状添加到 canvas.shapes 中
+        if not new_shapes:
+            return
+        canvas.save_state()
         canvas.shapes.extend(new_shapes)
         # 更新形状列表和画布
             # 临时保存并清除选中状态
@@ -654,6 +639,7 @@ class UIMainWindow(MainWindow):
         self.update_shapes_and_label_list()
         self.update_canvas()
         canvas.selected_shape = temp_selected
+        canvas.shapesChanged.emit()
         self.actionGetMER.setEnabled(False)
 
 
@@ -665,6 +651,9 @@ class UIMainWindow(MainWindow):
             QMessageBox.warning(self, "Notice", "No shapes to show.")
             return
 
+        canvas = self.get_current_graphics_view().canvas
+        if self._collect_shape_batch(canvas, 'Updating group IDs...', lambda shape: shape, 512) is None:
+            return
         # 切换全局状态
         self._global_show_group_id = not self._global_show_group_id
 
@@ -699,17 +688,29 @@ class UIMainWindow(MainWindow):
             QMessageBox.warning(self, "Notice", "No shapes to show.")
             return
 
+        if not any(shape.visible and shape.shape_type != 'point' for shape in current_shapes):
+            return
+        prepared = self._collect_shape_batch(
+            current_canvas, 'Converting shapes to Points...',
+            lambda shape: (shape, shape.get_universe_central_point())
+            if shape.visible and shape.shape_type in ('polygon', 'rectangle', 'rotated_rectangle')
+            else (shape, None), 64)
+        if prepared is None:
+            return
         # 标记转换前保存状态
         current_canvas.save_state()
 
         # 转换可见的形状为点，并正确标记脏状态
         shapes_changed = False
+        centers = {id(shape): center for shape, center in prepared if center is not None}
         for shape in current_shapes:
             if shape.visible:
                 # 记录原始类型
                 original_type = shape.shape_type
                 if original_type not in ["point"]:  # 避免重复转换点形状
-                    shape.convert_to_point_shape()
+                    if id(shape) in centers:
+                        shape.shape_type = 'point'
+                        shape.pointslist = [centers[id(shape)]]
                     shape._dirty = True  # 明确标记形状需要重绘
                     shapes_changed = True
 
@@ -726,6 +727,9 @@ class UIMainWindow(MainWindow):
     ### Function  - Reversing the Last Operation
     def undo(self):
         """撤销上一次操作，增加错误检查"""
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
+            QApplication.focusWidget().undo()
+            return
         try:
             # 检查是否有当前图形视图
             current_graphics_view = self.get_current_graphics_view()
@@ -740,29 +744,69 @@ class UIMainWindow(MainWindow):
                 return
             
             # 检查撤销栈是否为空
+            canvas._finish_geometry_edit()
             if not canvas.undo_stack:
                 QMessageBox.warning(self, "Notice", "There is no reversible operation.")
                 return
                 
             # 执行撤销操作
             canvas.undo()
-            self.update_shapes_and_label_list()
+            self.update_undo_button()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"An error occurred during the cancellation operation: {str(e)}")
+    def _history_icon(self, redo):
+        """Matching vector-style arrows; QIcon/QStyle provide the disabled appearance."""
+        icon = QtGui.QIcon()
+        for size in (16,24,32,48,64):
+            pixmap = QtGui.QPixmap(size,size)
+            pixmap.fill(Qt.transparent)
+            painter = QtGui.QPainter(pixmap)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            painter.scale(size/24,size/24)
+            if redo:
+                painter.translate(24,0)
+                painter.scale(-1,1)
+            painter.setPen(QtGui.QPen(self.palette().color(QtGui.QPalette.WindowText),
+                                     2.2,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin))
+            path = QtGui.QPainterPath(QtCore.QPointF(5,8))
+            path.lineTo(14,8)
+            path.cubicTo(23,8,23,20,13,20)
+            painter.drawPath(path)
+            painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(10,3),QtCore.QPointF(5,8),QtCore.QPointF(10,13)]))
+            painter.end()
+            icon.addPixmap(pixmap)
+        return icon
+
+    def redo(self):
+        # Text editors own text history; the new shortcut must not edit annotations.
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
+            QApplication.focusWidget().redo()
+            return
+        view = self.get_current_graphics_view()
+        if view and view.canvas:
+            view.canvas.redo()
+            self.update_undo_button()
+
     def update_undo_button(self):
         """更新撤销按钮的状态，增加对空画布的检查"""
         current_graphics_view = self.get_current_graphics_view()
+        self.actionRedo.setEnabled(bool(current_graphics_view and current_graphics_view.canvas
+                                       and current_graphics_view.canvas.redo_stack))
         
         # 检查是否有有效的图形视图
         if current_graphics_view is None:
             # 没有打开标签页，禁用撤销按钮
             self.actionUndo.setEnabled(False)
+            self.actionRedo.setEnabled(False)
+            self.update_list_on_tab_changed(self.tabWidget.currentIndex())
             return
         
         # 检查是否有有效的画布
         canvas = current_graphics_view.canvas
         if canvas is None:
             self.actionUndo.setEnabled(False)
+            self.actionRedo.setEnabled(False)
+            self.update_list_on_tab_changed(self.tabWidget.currentIndex())
             return
         
         # 检查撤销栈是否有内容
@@ -775,7 +819,10 @@ class UIMainWindow(MainWindow):
     ### Function - Copying a Shape
     def duplicate_shape(self):
         """复制选中的形状，保持classnum一致，递增group_id"""
-        canvas = self.get_current_graphics_view().canvas
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return
+        canvas = view.canvas
         if not canvas.selected_shape:
             return
 
@@ -783,17 +830,26 @@ class UIMainWindow(MainWindow):
         existing_shapes = self.get_current_shapes()
         max_group_id = max([s.group_id for s in existing_shapes if s.group_id is not None], default=-1)
 
-        # 复制每个选中的形状
-        for shape in canvas.selected_shape:
-            new_shape = shape.copy()  # 使用Shape类的自定义copy方法
-            # 递增group_id
-            max_group_id += 1
-            new_shape.group_id = max_group_id
-            # 稍微偏移位置以区分
-            new_shape.moveBy(10, 10)
-            # 添加到画布
-            canvas.add_shape(new_shape)  # 使用add_shape方法
-            new_shape.update_shape()
+        canvas.save_state()
+        blocker = QtCore.QSignalBlocker(canvas)
+        try:
+            # 复制每个选中的形状
+            for shape in list(canvas.selected_shape):
+                new_shape = shape.copy()  # 使用Shape类的自定义copy方法
+                new_shape.selected = False
+                # 递增group_id
+                max_group_id += 1
+                new_shape.group_id = max_group_id
+                # 稍微偏移位置以区分
+                new_shape.moveBy(10, 10)
+                if new_shape.shape_type == 'point' and len(new_shape.pointslist) == 1:
+                    new_shape.pointslist = [canvas.bounded_point(new_shape.pointslist[0])]
+                # 添加到画布
+                canvas.add_shape(new_shape)  # 使用add_shape方法
+                new_shape.update_shape()
+        finally:
+            del blocker
+        canvas.shapesChanged.emit()
 
         # 更新界面
         self.update_actions_inDocks()
@@ -806,144 +862,81 @@ class UIMainWindow(MainWindow):
     # 功能实现--labellist 窗口列可见性，在图中显示
     # Function  - Visibility of column labels in the labellist window, displayed in the diagram.
     def on_label_visibility_changed(self, label, visible):
-        for shape in self.get_current_shapes():
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return
+        canvas = view.canvas
+        previous = any(shape.visible for shape in canvas.shapes if shape.label == label)
+        shapes = self._collect_shape_batch(canvas, 'Updating class visibility...',
+                                           lambda shape: shape, 512)
+        if shapes is None:
+            self.labeldockinstance.checkbox_dict[label] = previous
+            table = self.labeldockinstance.table_widget
+            for row in range(table.rowCount()):
+                item = table.item(row, 1)
+                if item is not None and item.data(Qt.UserRole) == label:
+                    checkbox = table.cellWidget(row, 0)
+                    blocker = QtCore.QSignalBlocker(checkbox)
+                    checkbox.setChecked(previous)
+                    del blocker
+                    break
+            return
+        if any(shape.label == label and shape.visible != visible for shape in shapes):
+            canvas.save_state()
+        else:
+            return
+        for shape in shapes:
             if shape.label == label:
                 shape.visible = visible
         self.shapedockinstance.update_visibility()
         self.get_current_graphics_view().update()
+        canvas.shapesChanged.emit()
 
     # 当在窗口列选择，在Canvas中显示
     # When selecting in the window column, it will be displayed in the Canvas.
-    def on_shape_selected_in_dock(self, selected_rows_in_dock):
-        """安全处理在 dock 中选择形状的事件"""
-        self._noShapeListSelectionSlot = True
+        self.schedule_measurement_refresh()
 
+    def _sync_shape_selection(self, shapes, source=None, primary=None, scroll=False):
+        if getattr(self, '_syncing_shape_selection', False):
+            return
+        view = self.get_current_graphics_view()
+        canvas = view.canvas if view else None
+        if canvas is None or (isinstance(source, Canvas) and source is not canvas):
+            return
+        if any(canvas._shape_by_id.get(getattr(s, '_history_id', None)) is not s for s in shapes):
+            return
+        selected = [s for s in shapes if canvas._shape_by_id.get(getattr(s, '_history_id', None)) is s]
+        if primary is not None and canvas._shape_by_id.get(getattr(primary, '_history_id', None)) is not primary:
+            return
+        if primary is None:
+            previous = canvas._shape_by_id.get(getattr(self, '_selection_primary_id', None))
+            primary = previous if any(s is previous for s in selected) else (selected[-1] if selected else None)
+        self._selection_primary_id = getattr(primary, '_history_id', None)
+        self._syncing_shape_selection = True
         try:
-            # 如果另一个事件处理已经激活，则直接返回
-            if self._noCanvasSelectionSlot:
-                return
-                
-            # 获取当前图像视图
-            current_graphics_view = self.get_current_graphics_view()
-            if not current_graphics_view:
-                print("Warning: No current graphics view available.")
-                return
-                
-            # 检查画布是否存在
-            canvas = current_graphics_view.canvas
-            if not canvas:
-                print("Warning: No canvas available in current graphics view.")
-                return
-                
-            # 清除所有形状的选中状态
-            for shape in canvas.shapes:
-                shape.selected = False
-                
-            # 更新选中状态
-            for shape in selected_rows_in_dock:
-                shape.selected = True
-                
-            canvas.selected_shape = selected_rows_in_dock.copy()
-            canvas.update()
-
-            # 更新工具栏按钮状态
-            has_selected = bool(canvas.selected_shape)
-            self.actionDuplicate.setEnabled(has_selected)
-            self.actionDelete.setEnabled(has_selected)
-
-        except Exception as e:
-            print(f"Error in on_shape_selected_in_dock: {e}")
+            canvas.set_selected_shapes(selected)
+            # Preserve Qt's current index and Shift anchor in the originating
+            # view. Only recipient views select/scroll, once per user gesture.
+            if source is not self.shapedockinstance:
+                self.shapedockinstance.select_shapes(selected, primary, scroll)
+            if source is not self.measured_results_dock:
+                self.measured_results_dock.select_shapes(selected, primary, scroll)
+            self.actionDuplicate.setEnabled(bool(selected))
+            self.actionDelete.setEnabled(bool(selected))
         finally:
-            self._noShapeListSelectionSlot = False
+            self._syncing_shape_selection = False
 
-    # 当 canvas 中的某个形状被选中时，触发 shapeSelected 信号，并调用这个槽函数。
-    # When a certain shape in the canvas is selected
-    def on_shape_selected_in_canvas(self, canvas_selected_shapes):
-        """安全处理在 canvas 中选择形状的事件"""
-        self._noCanvasSelectionSlot = True
-        try:
-            # 如果另一个事件处理已经激活，则直接返回
-            if self._noShapeListSelectionSlot:
-                return
-                
-            # 获取当前图像视图
-            current_graphics_view = self.get_current_graphics_view()
-            if not current_graphics_view:
-                print("Warning: No current graphics view available.")
-                return
-                
-            # 检查画布是否存在
-            canvas = current_graphics_view.canvas
-            if not canvas:
-                print("Warning: No canvas available in current graphics view.")
-                return
-                
-            # 清除之前选择的形状
-            for s in canvas.selected_shape:
-                s.selected = False
-                
-            self.shapedockinstance.clearSelection()
-            canvas.selected_shape = canvas_selected_shapes
+    def on_shape_selected_in_dock(self, shapes):
+        source = self.sender()
+        if source not in (self.shapedockinstance, self.measured_results_dock):
+            source = None
+        primary = source.primary_shape() if source is not None else None
+        self._sync_shape_selection(shapes, source, primary, scroll=True)
 
-            if len(canvas_selected_shapes) == 1:
-                s = canvas_selected_shapes[0]
-                s.selected = True
-                row = self.shapedockinstance.findItemByShape(s)
-                if row >= 0:  # 检查是否找到了有效的行
-                    self.shapedockinstance.selectItem(row)
-                    self.shapedockinstance.scrollToItem(row)
-            else:
-                rows_to_select = []
-                for s in canvas_selected_shapes:
-                    s.selected = True
-                    row = self.shapedockinstance.findItemByShape(s)
-                    rows_to_select.append(row)
-                self.shapedockinstance.selectItems(rows_to_select)
-                if rows_to_select:
-                    self.shapedockinstance.scrollToItem(rows_to_select[-1])
-                    
-            # 更新工具栏按钮状态
-            has_selected = bool(canvas.selected_shape)
-            self.actionDuplicate.setEnabled(has_selected)
-            self.actionDelete.setEnabled(has_selected)
-            
-        except Exception as e:
-            print(f"Error in on_shape_selected_in_canvas: {e}")
-        finally:
-            self._noCanvasSelectionSlot = False
-
-    # 更新dock窗口中的操作状 Update the operation status in the dock window
-
-    # def update_actions_inDocks(self):
-    #     """更加安全地更新dock窗口中的操作状态"""
-    #     try:
-    #         # 更新ShapeListDock
-    #         if hasattr(self, 'shapedockinstance'):
-    #             self.shapedockinstance.table_widget.viewport().update()
-
-    #         # 更新LabelListDock
-    #         if hasattr(self, 'labeldockinstance'):
-    #             self.labeldockinstance.table_widget.viewport().update()
-
-    #         # 获取当前画布前进行检查
-    #         current_graphics_view = self.get_current_graphics_view()
-    #         if not current_graphics_view:
-    #             return
-                
-    #         # 检查画布是否存在    
-    #         current_canvas = current_graphics_view.canvas
-    #         if not current_canvas:
-    #             return
-                
-    #         # 更新工具栏状态
-    #         self.update_actions_inToolBar()
-
-    #         # 发送shapes changed信号
-    #         current_canvas.shapesChanged.emit()
-            
-    #     except Exception as e:
-    #         print(f"Error in update_actions_inDocks: {e}")
-# 更新dock窗口中的操作状 Update the operation status in the dock window
+    def on_shape_selected_in_canvas(self, shapes):
+        sender = self.sender()
+        self._sync_shape_selection(shapes, sender if isinstance(sender, Canvas) else None,
+                                   shapes[-1] if shapes else None, scroll=True)
 
     def update_actions_inDocks(self):
         """更加安全地更新dock窗口中的操作状态"""
@@ -982,95 +975,48 @@ class UIMainWindow(MainWindow):
 
     # 如果标签页改变，更新缩放标签，更新形状列表和标签列表
     def on_tab_changed_and_update_zoom_and_list(self, index):
+        if getattr(self, '_defer_batch_refresh', False):
+            return
         """标签页变化时的处理，确保安全处理特殊情况"""
         # 检查索引是否有效（有可能是 -1，表示没有标签页）
         if index < 0 or index >= self.tabWidget.count():
             # 没有标签页，禁用相关操作
             self.actionUndo.setEnabled(False)
+            self.actionRedo.setEnabled(False)
             return
             
         # 原有的更新缩放和列表
         self.update_zoom_on_tab_change(index)
         self.update_list_on_tab_changed(index)
+        self.refresh_measurements()
         
         # 更新 undo 按钮状态
         self.update_undo_button()
 
         # 更新shapedockinstance与labeldockinstance窗口
     def update_list_on_tab_changed(self, index):
-        current_graphics_view = self.get_current_graphics_view()
-        if current_graphics_view is not None:
-            current_canvas = current_graphics_view.canvas
+        view = self.get_current_graphics_view()
+        canvas = view.canvas if view else None
+        shapes = canvas.shapes if canvas is not None else []
+        table = self.shapedockinstance.table_widget
+        blocker = QtCore.QSignalBlocker(table)
+        self.shapedockinstance.populate(shapes)
+        self.labeldockinstance.populate(shapes, Shape.get_color_by_classnum)
+        del blocker
+        self.measurement_controller.bind(canvas)
+        if canvas is not None:
+            if not getattr(self.tabWidget, '_preserve_navigation_state', False):
+                canvas.set_selected_shapes([])
+            self._sync_shape_selection(canvas.selected_shape)
+        has_shapes = bool(shapes)
+        self.actionEditShapes.setChecked(has_shapes)
+        self.actionFilterAllEdges.setEnabled(has_shapes)
+        self.actionFilterTopLeft.setEnabled(has_shapes)
+        self.actionFilterRightBottom.setEnabled(has_shapes)
+        self.actionDeleteAllShapes.setEnabled(has_shapes)
+        self.actionGetMER.setEnabled(any(s.shape_type == 'polygon' for s in shapes))
+        self.refresh_measurements()
 
-            image_size = current_canvas.image_size
-            image_width = image_size.width()
-            image_height = image_size.height()
-
-            if hasattr(self, 'global_scale_info'):
-                scale_info = self.global_scale_info
-            else:
-                if hasattr(current_graphics_view, 'scale_info'):
-                    scale_info = current_graphics_view.scale_info
-                else:
-                    scale_info = None  # 如果没有设置比例尺，则为 None
-
-            if current_canvas.shapes:
-                shapes = getattr(current_canvas, 'shapes', [])
-                for s in shapes:
-                    s.selected = False
-
-                self.shapedockinstance.populate(shapes)
-                self.labeldockinstance.populate(shapes, Shape.get_color_by_classnum)
-                visible_shapes = [s for s in shapes if s.visible]
-
-                self.actionEditShapes.setChecked(True)
-                self.actionFilterAllEdges.setEnabled(True)
-                self.actionFilterTopLeft.setEnabled(True)
-                self.actionFilterRightBottom.setEnabled(True)
-                self.actionFeatureExtraction.setEnabled(True)
-                self.actionDeleteAllShapes.setEnabled(True)
-
-                if any(s.shape_type == "polygon" for s in shapes):
-                    self.actionGetMER.setEnabled(True)
-                else:
-                    self.actionGetMER.setEnabled(False)
-
-                if any(s.feature_results for s in visible_shapes):
-                    self.measured_results_dock.populate(visible_shapes)
-                    self.image_results_summary_dock.populate(visible_shapes, image_width, image_height, scale_info)
-                else:
-                    self.measured_results_dock.populate([])
-                    # 提供默认的 image_width 和 image_height
-                    self.image_results_summary_dock.populate([], 0, 0, None)
-            else:
-                self.shapedockinstance.populate([])
-                self.labeldockinstance.populate([], Shape.get_color_by_classnum)
-                self.measured_results_dock.populate([])
-                # 提供默认的 image_width 和 image_height
-                self.image_results_summary_dock.populate([], 0, 0, None)
-
-                self.actionEditShapes.setChecked(False)
-                self.actionFilterAllEdges.setEnabled(False)
-                self.actionFilterTopLeft.setEnabled(False)
-                self.actionFilterRightBottom.setEnabled(False)
-                self.actionFeatureExtraction.setEnabled(False)
-                self.actionDeleteAllShapes.setEnabled(False)
-                self.actionGetMER.setEnabled(False)
-        else:
-            # 当没有打开的标签页时，清空所有列表，并提供默认的图像尺寸和比例尺信息
-            self.shapedockinstance.populate([])
-            self.labeldockinstance.populate([], Shape.get_color_by_classnum)
-            self.measured_results_dock.populate([])
-            # 这里提供默认的 image_width 和 image_height
-            self.image_results_summary_dock.populate([], 0, 0, None)
-            self.actionFilterAllEdges.setEnabled(False)
-            self.actionFilterTopLeft.setEnabled(False)
-            self.actionFilterRightBottom.setEnabled(False)
-            self.actionFeatureExtraction.setEnabled(False)
-            self.actionDeleteAllShapes.setEnabled(False)
-            self.actionGetMER.setEnabled(False)
-
-    ### 更新当前canvas Update the current canvas
     def update_canvas(self):
         """安全地更新当前画布"""
         try:
@@ -1090,16 +1036,28 @@ class UIMainWindow(MainWindow):
                 
             # 请求重绘
             canvas.update()
-            
+            self.schedule_measurement_refresh()
         except Exception as e:
             print(f"Error in update_canvas: {e}")
 
     def on_shapes_changed_in_canvas(self):
+        if (getattr(self, '_defer_batch_refresh', False)
+                or getattr(self, '_metadata_edit_in_progress', False)):
+            return
+        view = self.get_current_graphics_view()
+        sender = self.sender()
+        if isinstance(sender, Canvas) and (not view or sender is not view.canvas):
+            return
         self.update_shapes_and_label_list()
+        self.refresh_measurements()
+        if view and view.canvas:
+            self._sync_shape_selection(view.canvas.selected_shape)
         self.update_undo_button()
         # self.update_filter_actions()
 
     def update_shapes_and_label_list(self):
+        if getattr(self, '_defer_batch_refresh', False):
+            return
         """安全地更新形状和标签列表"""
         try:
             # 获取当前图像视图
@@ -1114,15 +1072,9 @@ class UIMainWindow(MainWindow):
                 return
                 
             shapes = canvas.shapes
-            has_selected = bool(canvas.selected_shape)
-            
-            # 更新形状列表显示
-            if has_selected:
-                pass
-            else:
-                self.shapedockinstance.populate(shapes)
-                self.labeldockinstance.populate(shapes, Shape.get_color_by_classnum)
-                
+            self.shapedockinstance.sync_shapes(shapes)
+            self.labeldockinstance.sync_labels(shapes, Shape.get_color_by_classnum)
+
         except Exception as e:
             print(f"Error in update_shapes_and_label_list: {e}")
 
@@ -1193,41 +1145,115 @@ class UIMainWindow(MainWindow):
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     #################################################################
     def handle_zoom_changed(self, value):
-        """处理 zoomChanged 信号，更新 QLineEdit。"""
+        """Update controls without feeding rounded percentages into geometry."""
+        current_view = self.get_current_graphics_view()
+        sender = self.sender()
+        if isinstance(sender, ImageGraphicsView) and sender is not current_view:
+            return
         self.zoomLineEdit.blockSignals(True)
-        self.zoomLineEdit.setText(f"{value}%")
+        self.zoomLineEdit.setText(f"{int(value)}%")
         self.zoomLineEdit.blockSignals(False)
-        # 更新 zoomSlider
         self.zoomSlider.blockSignals(True)
-        self.zoomSlider.setValue(value)
+        self.zoomSlider.setValue(int(value))
         self.zoomSlider.blockSignals(False)
-        # 更新 Canvas 的 scale_factor
-        current_graphics_view = self.get_current_graphics_view()
-        if current_graphics_view and current_graphics_view.canvas:
-            scale_factor = value / 100.0
-            current_graphics_view.canvas.set_scale_factor(scale_factor)
-            current_graphics_view.canvas.update()
+        if current_view:
+            current_view.sync_annotation_scale()
 
+
+    def update_image_status(self, index=None):
+        """Image metadata is refreshed on navigation/open/close, never on mouse movement."""
+        tab = self.tabWidget.currentWidget() if index is None else self.tabWidget.widget(index)
+        view = tab.property('graphics_view') if tab is not None else None
+        self.update_scale_status()
+        if view is not None and not view.viewport().property('sqStatusFilter'):
+            view.viewport().installEventFilter(self)
+            view.viewport().setProperty('sqStatusFilter', True)
+        if view is not None:
+            view.setAcceptDrops(True)
+            view.viewport().setAcceptDrops(True)
+            view._drop_tab = tab
+            view.viewport()._drop_tab = tab
+        pixmap = view.pixmap_item.pixmap() if view and view.pixmap_item else None
+        has_image = pixmap is not None and not pixmap.isNull()
+        self.mousePositionLabel.setText('X: —  Y: —')
+        self.pixelValueLabel.setText('Pixel: —')
+        self.zoomOutButton.setEnabled(has_image)
+        self.zoomInButton.setEnabled(has_image)
+        self.imageSizeLabel.setText(f'{pixmap.width()} × {pixmap.height()} px'
+                                    if has_image else '— × — px')
+        self.fileSizeLabel.setText('— MB')
+        file_path = tab.property('file_path') if tab is not None else None
+        self.pathLabel.setText(os.path.abspath(os.fspath(file_path)) if has_image and file_path else '')
+        if has_image and file_path:
+            try:
+                size = os.path.getsize(file_path)
+                self.fileSizeLabel.setText(f'{size / (1024 * 1024):.1f} MB')
+            except OSError:
+                pass
+
+    def update_scale_status(self):
+        """Display the current tab's effective calibration without resetting pointer status."""
+        view = self.get_current_graphics_view()
+        info = resolve_scale(self, view) if view is not None else None
+        if info is None:
+            self.scaleLabel.setText('Scale: Not set')
+        else:
+            unit = 'µm' if info['unit'] in ('um', 'μm', 'µm') else info['unit']
+            unit = 'px' if unit in ('pixel', 'pixels') else unit
+            self.scaleLabel.setText(f'Scale: {info["scale"]:.9g} {unit}/px')
+
+    def update_model_status(self):
+        """Reflect the loaded global model, independent of image tabs."""
+        model = getattr(self, 'model', None)
+        name = None
+        if model is not None:
+            for attribute in ('_stomataquant_source_path', 'model_name', 'ckpt_path'):
+                value = getattr(model, attribute, None)
+                if isinstance(value, (str, os.PathLike)) and value:
+                    name = os.path.basename(os.fspath(value).replace('\\', '/'))
+                    break
+        self.modelLabel.setModelText(f'Model: {name or ("Unknown" if model is not None else "None")}')
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QtCore.QEvent.DragEnter, QtCore.QEvent.DragMove, QtCore.QEvent.Drop):
+            if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+                event.acceptProposedAction()
+                if event.type() == QtCore.QEvent.Drop:
+                    from drop_workflow import start_drop
+                    start_drop(self, [url.toLocalFile() for url in event.mimeData().urls()
+                                      if url.isLocalFile()], getattr(watched, '_drop_tab', None))
+                return True
+        if event.type() == QtCore.QEvent.Leave:
+            view = self.get_current_graphics_view()
+            if view is not None and watched is view.viewport():
+                self.mousePositionLabel.setText('X: —  Y: —')
+                self.pixelValueLabel.setText('Pixel: —')
+        return super().eventFilter(watched, event)
 
     # 对应GUI上鼠标位置标签的改变对于鼠标位置改变时候，更新QLabel
     # Corresponding to the change of the mouse position label on the GUI, update QLabel when the mouse position changes.
     def update_mouse_position(self, x, y):
         try:
             current_graphics_view = self.get_current_graphics_view()
+            sender = self.sender()
+            if isinstance(sender, ImageGraphicsView) and sender is not current_graphics_view:
+                return
             if current_graphics_view and current_graphics_view.pixmap_item:
                 pixmap = current_graphics_view.pixmap_item.pixmap()
                 if not pixmap.isNull():
-                    image = pixmap.toImage()
-                    if 0 <= x < image.width() and 0 <= y < image.height():
+                    if 0 <= x < pixmap.width() and 0 <= y < pixmap.height():
                         # 鼠标在图像范围内
-                        self.mousePositionLabel.setText(f"Mouse Position: (x={x}, y={y}); ")
+                        self.mousePositionLabel.setText(f"X: {x}  Y: {y}")
                     else:
                         # 鼠标在图像范围外
-                        self.mousePositionLabel.setText("Mouse Position: N/A; ")
+                        self.mousePositionLabel.setText("X: —  Y: —")
+                        self.pixelValueLabel.setText("Pixel: —")
                 else:
-                    self.mousePositionLabel.setText("Mouse Position: N/A; ")
+                    self.mousePositionLabel.setText("X: —  Y: —")
+                    self.pixelValueLabel.setText("Pixel: —")
             else:
-                self.mousePositionLabel.setText("Mouse Position: N/A; ")
+                self.mousePositionLabel.setText("X: —  Y: —")
+                self.pixelValueLabel.setText("Pixel: —")
         except Exception as e:
             print(f"Error in update_mouse_position: {e}")
 
@@ -1235,11 +1261,16 @@ class UIMainWindow(MainWindow):
     # When the pixel value changes, update the QLabel corresponding to the change of the pixel value label on the GUI.
     def update_pixel_value(self, r, g, b):
         try:
-            if r == -1 and g == -1 and b == -1:
+            view = self.get_current_graphics_view()
+            sender = self.sender()
+            if isinstance(sender, ImageGraphicsView) and sender is not view:
+                return
+            if ((r == -1 and g == -1 and b == -1) or not view or not view.pixmap_item
+                    or view.pixmap_item.pixmap().isNull()):
                 # 当接收到 -1，表示鼠标在图像范围外，显示 "N/A"
-                self.pixelValueLabel.setText("Pixel Value: N/A; ")
+                self.pixelValueLabel.setText("Pixel: —")
             else:
-                self.pixelValueLabel.setText(f"Pixel Value: R={r}, G={g}, B={b}; ")
+                self.pixelValueLabel.setText(f"Pixel: R={r} G={g} B={b}")
         except Exception as e:
             print(f"Error in update_pixel_value: {e}")
 
@@ -1273,13 +1304,8 @@ class UIMainWindow(MainWindow):
     def zoom_slider_changed(self, value):
         current_graphics_view = self.get_current_graphics_view()
         if current_graphics_view:
-            scale_factor = value / 100.0
-            current_graphics_view.resetTransform()  # 先重置变换，避免累积缩放
-            current_graphics_view.scale(scale_factor, scale_factor)  # 应用新的缩放比例
-            current_graphics_view.current_zoom = value
-            current_graphics_view.zoomChanged.emit(value)  # 确保发射信号
-            # 更新 QLineEdit
-            self.handle_zoom_changed(value)  # 直接调用新的处理方法
+            current_graphics_view.apply_zoom(value)
+
 
     # 功能：链接zoomLineEdit中值发生改变时做的操作；更新QLineEdit和QSlider
     # Function: Link the operation performed when the value in zoomLineEdit changes; Update QLineEdit and QSlider
@@ -1320,32 +1346,21 @@ class UIMainWindow(MainWindow):
                 if not pixmap.isNull():
                     current_zoom = graphics_view.current_zoom
                     self.zoomLineEdit.blockSignals(True)
-                    self.zoomLineEdit.setText(f"{current_zoom}%")
+                    self.zoomLineEdit.setText(f"{int(round(current_zoom))}%")
                     self.zoomLineEdit.blockSignals(False)
 
                     self.zoomSlider.blockSignals(True)
-                    self.zoomSlider.setValue(int(current_zoom))
+                    self.zoomSlider.setValue(int(round(current_zoom)))
                     self.zoomSlider.blockSignals(False)
 
-                    self.imageSizeLabel.setText(f"Image Size: {pixmap.width()}x{pixmap.height()} pixels; ")
-                    try:
-                        file_size = os.path.getsize(file_path)
-                        self.fileSizeLabel.setText(f"File Size: {file_size / 1024:.2f} KB; ")
-                    except OSError as e:
-                        self.fileSizeLabel.setText("File Size: N/A; ")
-                        print(f"Error getting file size: {e}")
                 else:
                     print("Pixmap is null.")
-                    self.imageSizeLabel.setText("Image Size: N/A; ")
-                    self.fileSizeLabel.setText("File Size: N/A; ")
             else:
                 print("GraphicsView 或 pixmap_item 不存在，或 file_path 是 None。")
-                self.imageSizeLabel.setText("Image Size: N/A; ")
-                self.fileSizeLabel.setText("File Size: N/A; ")
         else:
             print("The current TAB page does not exist。")
-            self.imageSizeLabel.setText("Image Size: N/A; ")
-            self.fileSizeLabel.setText("File Size: N/A; ")
+        # Batch-created tabs also use this existing UI refresh entry point.
+        self.update_image_status()
 
     #################################################################
     # 一系列形状的创建，主要调用canvas中的方法
@@ -1422,7 +1437,7 @@ class UIMainWindow(MainWindow):
             auto_applied = True
         else:
             # 获取当前所有标签
-            existing_shapes = [s for s in self.get_current_shapes() if s != shape]
+            existing_shapes = [s for s in self.get_current_shapes() if s is not shape]
             existing_labels = list(set([s.label for s in existing_shapes if s.label]))
             # 显示标签输入对话框
             dialog = LabelInputDialog(existing_labels)
@@ -1444,7 +1459,7 @@ class UIMainWindow(MainWindow):
         # 为形状设置标签
         shape.label = label
 # --- 核心性能修复：移除阻塞UI线程的print，优化分配逻辑 ---
-        existing_shapes = [s for s in self.get_current_shapes() if s != shape]
+        existing_shapes = [s for s in self.get_current_shapes() if s is not shape]
         
         match_classnum = None
         max_group_id = -1
@@ -1482,7 +1497,7 @@ class UIMainWindow(MainWindow):
         self.labeldockinstance.add_label(shape.label)
         self.shapedockinstance.add_shape(shape)
         self.update_actions_inDocks()
-        # existing_shapes = [s for s in self.get_current_shapes() if s != shape]
+        # existing_shapes = [s for s in self.get_current_shapes() if s is not shape]
         # existing_same_label_shapes = []
         # existing_same_type_shapes = []
 
@@ -1542,13 +1557,52 @@ class UIMainWindow(MainWindow):
     #↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     #################################################################
 
+    def open_folder(self):
+        from drop_workflow import start_drop
+        folder = QFileDialog.getExistingDirectory(self, 'Select image folder')
+        if not folder:
+            return
+        return start_drop(self, [folder], folder=True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            from drop_workflow import start_drop
+            event.acceptProposedAction()
+            start_drop(self, [url.toLocalFile() for url in event.mimeData().urls()
+                              if url.isLocalFile()])
+        else:
+            super().dropEvent(event)
+
     def open_file(self):
         options = QFileDialog.Options()
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Select image files", "",
                                                     "Image Files (*.png *.jpg *.jpeg *.bmp *.tif);;All Files (*)",
                                                     options=options)
+        return self.open_image_paths(file_paths)
+
+    def open_image_paths(self, file_paths):
+        from batch_ui import image_path_key
+        opened = []
         for file_path in file_paths:
-            if file_path and file_path not in self.opened_files:
+            if not file_path:
+                continue
+            file_path = os.path.abspath(os.fspath(file_path))
+            existing = next((i for i in range(self.tabWidget.count())
+                             if image_path_key(self.tabWidget.widget(i).property('file_path'))
+                             == image_path_key(file_path)), -1)
+            if existing < 0:
                 print(f"LOAD IMAGE: {file_path} from open_file method")  # 调试信息
                 
                 # 创建一个新标签页
@@ -1595,9 +1649,22 @@ class UIMainWindow(MainWindow):
                 
                 # 选择新添加的标签页
                 self.tabWidget.setCurrentIndex(tab_index)
+                settings = QtCore.QSettings('StomaQuant', 'GUI')
+                saved_location = settings.value('annotation_sessions/' + source_suffix(file_path), '')
+                saved_session = Path(saved_location) if saved_location and Path(saved_location).exists() else session_path(file_path)
+                if saved_session.exists() and not getattr(self, '_suppress_automatic_session_load', False):
+                    try:
+                        graphics_view.canvas.shapes = load_annotation_session(saved_session, graphics_view.canvas)
+                        graphics_view.canvas.shapesChanged.emit()
+                    except Exception as error:
+                        QMessageBox.warning(self, 'Annotation Session',
+                                            f'Could not load saved annotations: {error}')
+                tab._annotation_saved_snapshot = annotation_snapshot(graphics_view.canvas)
+                tab._annotation_session_path = str(saved_session)
                 
                 # 将文件添加到已打开文件列表中
                 self.opened_files.append(file_path)
+                opened.append(tab)
                 
                 # 启用相关操作
                 self.actionEditShapes.setEnabled(True)
@@ -1605,26 +1672,79 @@ class UIMainWindow(MainWindow):
                 self.actionFilterTopLeft.setEnabled(True)
                 self.actionFilterRightBottom.setEnabled(True)
                 
-                # 添加文件大小标签
-                file_size = os.path.getsize(file_path)
-                self.fileSizeLabel.setText(f"File Size: {file_size / 1024:.1f} KB; ")
                 self.fit_to_view()
-                
-                # 添加图像大小标签
-                pixmap = graphics_view.pixmap_item.pixmap()
-                self.imageSizeLabel.setText(f"Image Size: {pixmap.width()}×{pixmap.height()}; ")
+                # The first tab's currentChanged signal precedes setting its properties.
+                self.update_image_status()
             else:
-                if file_path in self.opened_files:
-                    # 文件已经打开，切换到该标签页
-                    for i in range(self.tabWidget.count()):
-                        tab = self.tabWidget.widget(i)
-                        if tab.property("file_path") == file_path:
-                            self.tabWidget.setCurrentIndex(i)
-                            
-                            break
+                self.tabWidget.setCurrentIndex(existing)
+                opened.append(self.tabWidget.widget(existing))
+        return opened
+
+    def is_tab_dirty(self, tab):
+        view = tab.property('graphics_view') if tab is not None else None
+        return bool(view and view.canvas and
+                    annotation_snapshot(view.canvas) != getattr(tab, '_annotation_saved_snapshot', ()))
+
+    def _mark_annotation_saved(self, tab):
+        view = tab.property('graphics_view') if tab is not None else None
+        if view and view.canvas:
+            tab._annotation_saved_snapshot = annotation_snapshot(view.canvas)
+            saved = session_path(tab.property('file_path'))
+            tab._annotation_session_path = str(saved)
+            QtCore.QSettings('StomaQuant', 'GUI').setValue(
+                'annotation_sessions/' + source_suffix(tab.property('file_path')), str(saved))
+
+    def _save_annotation_session_before_export(self, tab, canvas):
+        # YOLO TXT omits labels, IDs, visibility and other annotation kinds.
+        # Keep the complete editable state before acknowledging a Save.
+        save_annotation_session(session_path(tab.property('file_path')), canvas)
+
+    def _confirm_unsaved_tab(self, tab):
+        if self.is_tab_dirty(tab) and not self._discard_unsaved_for_session:
+            prompt = QMessageBox(self)
+            prompt.setIcon(QMessageBox.Warning)
+            prompt.setWindowTitle('Unsaved Annotations')
+            prompt.setText('This image has unsaved annotation changes. Save before closing?')
+            prompt.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            prompt.setDefaultButton(QMessageBox.Save)
+            do_not_ask = QtWidgets.QCheckBox("Don't ask again for this session", prompt)
+            prompt.setCheckBox(do_not_ask)
+            answer = prompt.exec_()
+            if answer == QMessageBox.Cancel or answer not in (QMessageBox.Save, QMessageBox.Discard):
+                return False
+            if answer == QMessageBox.Discard and do_not_ask.isChecked():
+                self._discard_unsaved_for_session = True
+            if answer == QMessageBox.Save:
+                view = tab.property('graphics_view')
+                image_path = tab.property('file_path')
+                suggested = getattr(tab, '_annotation_session_path', str(session_path(image_path)))
+                destination, _ = QFileDialog.getSaveFileName(
+                    self, 'Save Annotations', suggested,
+                    'StomataQuant Annotations (*.json);;All Files (*)')
+                if not destination:
+                    return False
+                try:
+                    saved = save_annotation_session(destination, view.canvas)
+                except Exception as error:
+                    QMessageBox.critical(self, 'Save Failed', f'Failed to save annotations: {error}')
+                    return False
+                tab._annotation_saved_snapshot = saved
+                tab._annotation_session_path = destination
+                QtCore.QSettings('StomaQuant', 'GUI').setValue(
+                    'annotation_sessions/' + source_suffix(image_path), destination)
+        return True
 
     def close_tab(self, index):
         tab = self.tabWidget.widget(index)
+        if tab is None or not self._confirm_unsaved_tab(tab):
+            return False
+        if tab:
+            view = tab.property('graphics_view')
+            if view and view.canvas:
+                if self.measurement_controller.active() is view.canvas:
+                    self.shapedockinstance.populate([])
+                self.measurement_controller.release(view.canvas)
+            task_manager(self).cancel_view(view)
         if tab:
             # 获取文件路径并从打开文件列表中移除
             file_path = tab.property("file_path")
@@ -1649,7 +1769,14 @@ class UIMainWindow(MainWindow):
                         
                         # 明确清空撤销栈，释放资源
                         if hasattr(graphics_view.canvas, 'undo_stack'):
-                            graphics_view.canvas.undo_stack.clear()
+                            graphics_view.canvas._history.clear()
+                        graphics_view.canvas.selected_shape = []
+                        graphics_view.canvas.hovered_shape = graphics_view.canvas._last_hover_shape = None
+                        graphics_view.canvas.current_shape = None
+                        graphics_view.canvas._edit_original = ()
+                        graphics_view.canvas._edit_before = None
+                        graphics_view.canvas._history_pending = None
+                        graphics_view.canvas._reset_edit_motion()
                         
                         # 清空 Canvas 的形状列表
                         if hasattr(graphics_view.canvas, 'shapes'):
@@ -1691,18 +1818,15 @@ class UIMainWindow(MainWindow):
             self.image_results_summary_dock.populate([], 0, 0, None)
             
             # 重置状态栏
-            self.mousePositionLabel.setText("Mouse Position: N/A; ")
-            self.pixelValueLabel.setText("Pixel Value: N/A; ")
-            self.imageSizeLabel.setText("Image Size: N/A; ")
-            self.fileSizeLabel.setText("File Size: N/A; ")
+            self.update_image_status()
             
             # 禁用依赖图像的操作
             self.actionEditShapes.setEnabled(False)
-            self.actionFeatureExtraction.setEnabled(False)
             self.actionGetMER.setEnabled(False)
             self.actionFilterAllEdges.setEnabled(False)
             self.actionFilterTopLeft.setEnabled(False)
             self.actionFilterRightBottom.setEnabled(False)
+        return True
 
     #################################################################
     # ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
@@ -1735,7 +1859,7 @@ class UIMainWindow(MainWindow):
 
                 # 获取当前图像路径
                 current_tab = self.tabWidget.currentWidget()
-                file_path = current_tab.property("file_path")
+                file_path = current_tab.property("file_path") if current_tab else None
 
                 # 如果没有图像，显示错误
                 if not file_path:
@@ -1748,6 +1872,10 @@ class UIMainWindow(MainWindow):
                 # 从资源文件中读取模型
 
                 model_resource = QFile(":/Cls_best.pt")
+                if sys.platform == 'darwin' and not model_resource.exists():
+                    bundled_model = macos_resource_path('Cls_best.pt')
+                    if bundled_model:
+                        model_resource = QFile(bundled_model)
                 if not model_resource.open(QIODevice.ReadOnly):
                     QMessageBox.critical(self, "错误", "无法从资源加载模型文件")
                     return None
@@ -1766,60 +1894,35 @@ class UIMainWindow(MainWindow):
 
                 # 创建并启动线程
                 self.aborad_thread = ABorADInferenceThread(temp_model_path, file_path, self)
-                self.aborad_thread.inferenceFinished.connect(self.on_aborad_inference_finished)
-                self.aborad_thread.start()
+                manager = task_manager(self)
+                task = manager.begin(current_tab, 'classification', self.progress_dialog_aborad)
+                self.aborad_thread.inferenceFinished.connect(
+                    lambda ab, ad, path, error, t=task: self.on_aborad_inference_finished(ab, ad, path, error, t))
+                self.aborad_thread.finished.connect(lambda p=temp_model_path: self._cleanup_aborad_resources(p))
+                manager.start(task, self.aborad_thread)
 
         except Exception as e:
             if hasattr(self, 'progress_dialog_aborad') and self.progress_dialog_aborad:
                 self.progress_dialog_aborad.accept()
             QMessageBox.warning(self, "Error", f"An error occurred: {str(e)}")
-            self._cleanup_aborad_resources()
+            if 'temp_model_path' in locals():
+                self._cleanup_aborad_resources(temp_model_path)
 
-    def on_aborad_inference_finished(self, ab_probability, ad_probability, file_path, error):
-        try:
-            # 关闭进度对话框
-            if hasattr(self, 'progress_dialog_aborad') and self.progress_dialog_aborad:
-                self.progress_dialog_aborad.update_message("Image inference AB or AD completed")
-                self.progress_dialog_aborad.accept()
+    def on_aborad_inference_finished(self, ab_probability, ad_probability, file_path, error, task=None):
+        manager = task_manager(self)
+        valid = manager.valid(task)
+        manager.finish(task)
+        if not valid:
+            return
+        if error:
+            QMessageBox.warning(self, 'Error', str(error))
+        else:
+            QMessageBox.information(self, 'Result:',
+                f'{os.path.basename(file_path)}\nabaxial_probability: {ab_probability:.4f}%, adaxial_probability: {ad_probability:.4f}%')
 
-            if error:
-                QMessageBox.warning(self, "Error", f"An error occurred during inference: {error}")
-                return
-
-            # 显示结果
-            output = f'abaxial_probability: {ab_probability:.4f}%, adaxial_probability: {ad_probability:.4f}%'
-
-            if not output.strip():
-                output = "No output information was detected.(Maybe the model is not loaded correctly.)"
-
-            # 显示在消息框中
-            QMessageBox.information(self, "Result:", output)
-        finally:
-            # 无论如何都要清理资源
-            self._cleanup_aborad_resources()
-
-    def _cleanup_aborad_resources(self):
-        """清理AB/AD推理相关的资源"""
-        # 清理临时模型文件
-        if hasattr(self, '_temp_model_path') and self._temp_model_path:
-            try:
-                if os.path.exists(self._temp_model_path):
-                    os.unlink(self._temp_model_path)
-                self._temp_model_path = None
-            except Exception as e:
-                print(f"An error occurred while cleaning the temporary model file: {e}")
-        
-        # 释放线程资源
-        if hasattr(self, 'aborad_thread') and self.aborad_thread:
-            try:
-                if self.aborad_thread.isRunning():
-                    self.aborad_thread.wait()
-                self.aborad_thread.deleteLater()
-                self.aborad_thread = None
-            except Exception as e:
-                print(f"An error occurred while cleaning thread resources: {e}")
-        gc.collect()
-        print("AB/AD inference resources cleaned up.")
+    def _cleanup_aborad_resources(self, path):
+        if path and os.path.exists(path):
+            os.unlink(path)
 
     #################################################################
     # ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
@@ -1852,6 +1955,8 @@ class UIMainWindow(MainWindow):
 
                 # 加载新模型
                 self.model = YOLO(model_path)
+                self.model._stomataquant_source_path = model_path
+                self.update_model_status()
                 model_name = model_path.split('/')[-1] if '/' in model_path else model_path.split('\\')[-1]
                 QMessageBox.information(self, "Model loading success",
                                         f"The model has been successfully loaded: {model_name}")
@@ -1859,6 +1964,8 @@ class UIMainWindow(MainWindow):
 
             except Exception as e:
                 QMessageBox.critical(self, "Model loading failure", f"Unable to load model: {str(e)}")
+            finally:
+                self.update_model_status()
 
     ### 关于推理设置的函数，其使用了InferenceSettingsDialog类，对应推理设置按钮
     ### Regarding the function for setting up the inference, it utilizes the InferenceSettingsDialog class, which corresponds to the inference settings button.
@@ -1914,15 +2021,19 @@ class UIMainWindow(MainWindow):
                     "conf": 0.5,
                     "iou": 0.7,
                     "device": "cpu",
-                    "save_path": os.path.join(os.getcwd(), "Inference_OutPut"),
+                    "save_path": (macos_output_dir("Inference_OutPut") if sys.platform == "darwin"
+                                  else os.path.join(os.getcwd(), "Inference_OutPut")),
                     "imgsz": 1024,
                     "max_det": 500
                 }
             
             # 创建并启动推理线程
             self.yolo_thread = YOLOSegInferenceThread(self.model, file_path, self.inference_settings, self)
-            self.yolo_thread.inferenceFinished.connect(self.on_inference_finished)
-            self.yolo_thread.start()
+            manager = task_manager(self)
+            task = manager.begin(current_tab, 'inference', self.progress_dialog, self.inference_settings)
+            self.yolo_thread.inferenceFinished.connect(
+                lambda results, path, error, t=task: self.on_inference_finished(results, path, error, t))
+            manager.start(task, self.yolo_thread)
 
         except Exception as e:
             if hasattr(self, 'progress_dialog') and self.progress_dialog:
@@ -1933,251 +2044,108 @@ class UIMainWindow(MainWindow):
     ### Some tasks after completing the inference, such as generating JSON files,
     ### generating Shape classes , and releasing variables that are no longer in use.
     # 修改on_inference_finished函数
-    def on_inference_finished(self, results, file_path, error):
-        if error:
-            QMessageBox.critical(self, "Error", f"An error occurs during the inference process: {error}")
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.accept()
+    def on_inference_finished(self, results, file_path, error, task=None):
+        manager = task_manager(self)
+        if not manager.valid(task):
+            manager.finish(task)
             return
-
-        
-        current_tab = self.tabWidget.currentWidget()
-        graphics_view = current_tab.property("graphics_view")
-        
-        # 后处理进行导入shape
-        self.box_shapes = []  # 存储box类型的形状，不需要线程处理
-        output_dir = self.inference_settings.get("save_path", os.path.join(os.getcwd(), "Inference_OutPut"))
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 更新进度条消息
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.update_message("Processing the inference results...")
-        
-        # 记录需要处理的结果数
-        self.remaining_results = len(results)
-        
-        has_segments = False  # 标记是否有segments类型的数据
-        
-        for result in results:
-            json_str = result.to_json()
-            json_obj = json.loads(json_str)  # 将 JSON 字符串解析为 Python 字典对象
-            # 生成 JSON 文件路径：
-            json_file_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(result.path))[0]}.json")
-            # 根据保存路径进行保存JSON文件
-            with open(json_file_path, 'w') as json_file:
-                json.dump(json_obj, json_file, indent=4)
-            
-            print(f'json文件保存至:{json_file_path}')  
-            if json_obj in [None, {},[]]:
-                QMessageBox.warning(
-                self,
-                "Notice",
-                "The model did not return any inference results. This might be because the  confidence is too high or the model is unable to identify the target in the image."
-            )
-                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                    self.progress_dialog.accept()
+        try:
+            if error:
+                raise error if isinstance(error, Exception) else RuntimeError(error)
+            output_dir = task.settings.get(
+                'save_path', macos_output_dir('Inference_OutPut') if sys.platform == 'darwin'
+                else os.path.join(os.getcwd(), 'Inference_OutPut'))
+            records, polygons = decode_predictions(results, output_dir)
+            if not records:
+                manager.finish(task)
+                QMessageBox.warning(self, 'Notice', 'The model did not return any inference results.')
                 return
-
-            if isinstance(json_obj, list):
-                current_canvas = graphics_view.canvas
-                image_size = current_canvas.image_size
-                image_width = image_size.width()
-                image_height = image_size.height()
-                
-                # 直接处理box类型的项目
-                class_counts = defaultdict(int)  # 用于追踪各个类别的group_id
-                for item in json_obj:
-                    if 'segments' not in item and 'box' in item:
-                        # 处理box类型，无需线程处理
-                        box = item['box']
-                        x1, y1 = box.get('x1', 0), box.get('y1', 0)
-                        x2, y2 = box.get('x2', 0), box.get('y2', 0)
-                        top_left = QPointF(x1, y1)
-                        bottom_right = QPointF(x2, y2)
-                        label = item.get('name', 'undefined')
-                        classnum = item.get('class', 'undefined')
-                        
-                        # 分配 group_id
-                        group_id = class_counts[classnum]
-                        class_counts[classnum] += 1
-                        
-                        shape = Shape(
-                            label=label, 
-                            classnum=classnum,
-                            pointslist=[top_left, bottom_right], 
-                            shape_type='rectangle', 
-                            group_id=group_id,
-                            scale_factor=graphics_view.canvas.scale_factor
-                        )
-                        self.box_shapes.append(shape)
-                        # 删除这里的调用，避免循环中重复更新UI
-                        # self.finish_processing_shapes(self.box_shapes)
-
-                    elif 'segments' in item:
-                        # 收集segments类型数据并按类别分组
-                        has_segments = True
-                        segment_items = [item for item in json_obj if 'segments' in item]
-                        if segment_items:
-                            # 按classnum分组收集坐标
-                            polygons_by_class = {}
-                            for item in segment_items:
-                                x_coords = item['segments'].get('x', [])
-                                y_coords = item['segments'].get('y', [])
-                                if len(x_coords) != len(y_coords):
-                                    continue
-                                    
-                                classnum = item.get('class', 'undefined')
-
-                                
-                                if classnum not in polygons_by_class:
-                                    polygons_by_class[classnum] = []
-                                
-                                polygons_by_class[classnum].append((x_coords, y_coords))
-                        
-                            # 只有当有多边形数据时才启动线程处理
-                            if polygons_by_class:
-                                # 更新进度条消息
-                                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                                    self.progress_dialog.update_message("Processing polygon data...")
-                                
-                                self.polygon_thread = PolygonProcessThread(
-                                    polygons_by_class, image_width, image_height, json_obj, self)
-                                self.polygon_thread.processingFinished.connect(self.on_polygon_processing_finished)
-                                self.polygon_thread.start()
-                                return  # 提前返回，等待线程处理完成
-                    else:
-                        QMessageBox.warning(self, "Error", "There is an error in the Json data structure.")
-                        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                            self.progress_dialog.accept()
-            
+            if polygons:
+                task.dialog.update_message('Processing polygon data...')
+                size = task.canvas.image_size
+                worker = PolygonProcessThread(polygons, size.width(), size.height(), records, self)
+                worker.processingFinished.connect(
+                    lambda processed, items, error, t=task: self.on_polygon_processing_finished(processed, items, error, t))
+                manager.start(task, worker)
             else:
-                QMessageBox.warning(self, "Error", "Unknown Error Occurred During the Process of Parsing Json.")
-                if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                    self.progress_dialog.accept()
-        
-        # 只有在没有segments类型数据时，才在这里处理box shapes
-        if not has_segments and self.box_shapes:
-            self.finish_processing_shapes(self.box_shapes)
+                self.finish_processing_shapes(shapes_from_predictions(records, {}, task.canvas), task)
+        except Exception as error:
+            manager.finish(task)
+            if not isinstance(error, OperationCancelled):
+                QMessageBox.warning(self, 'Inference error', str(error))
 
 
-    def on_polygon_processing_finished(self, processed_map, json_obj, error):
-        if error:
-            QMessageBox.warning(self, "Error", f"An error occurred during polygon processing: {error}")
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.accept()
+    def on_polygon_processing_finished(self, processed_map, json_obj, error, task=None):
+        manager = task_manager(self)
+        if not manager.valid(task):
+            manager.finish(task)
             return
-        
-        try:      
-            # 获取当前的画布和视图
-            current_tab = self.tabWidget.currentWidget()
-            graphics_view = current_tab.property("graphics_view")
-            current_canvas = graphics_view.canvas
-            
-            polygon_shapes = []  # 用于存储从多边形数据创建的形状
-            class_counts = defaultdict(int)  # 初始化计数器
-            
-            # 处理多边形数据
-            class_index_map = defaultdict(int)  # 用于跟踪每个类别内的索引
-            
-            # 处理每个json项
-            for item in json_obj:
-                if 'segments' in item:
-                    classnum = item.get('class', 'undefined')
-                    current_index = class_index_map[classnum]
-                    class_index_map[classnum] += 1
-                    
-                    # 获取多边形坐标
-                    pointslist = None
-                    
-                    # 尝试获取处理后的数据
-                    if classnum in processed_map:
-                        processed_data = processed_map[classnum]
-                        
-                        # 处理数据结构差异 (列表或字典)
-                        if isinstance(processed_data, list) and current_index < len(processed_data):
-                            x_coords, y_coords = processed_data[current_index]
-                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
-                        elif isinstance(processed_data, dict) and current_index in processed_data:
-                            x_coords, y_coords = processed_data[current_index]
-                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
-                    
-                    # 如果没有找到处理后的数据，使用原始数据
-                    if pointslist is None:
-                        x_coords = item['segments'].get('x', [])
-                        y_coords = item['segments'].get('y', [])
-                        if len(x_coords) == len(y_coords):  # 确保坐标数量匹配
-                            pointslist = [QPointF(x, y) for x, y in zip(x_coords, y_coords)]
-                        else:
-                            continue  # 跳过坐标不匹配的情况
-                    
-                    if not pointslist:
-                        continue  # 跳过空坐标的情况
-                    
-                    # 创建形状对象
-                    label = item.get('name', 'undefined')
-                    group_id = class_counts[classnum]
-                    class_counts[classnum] += 1
-                    
-                    shape = Shape(
-                        label=label, 
-                        classnum=classnum,
-                        pointslist=pointslist, 
-                        shape_type='polygon', 
-                        group_id=group_id,
-                        scale_factor=graphics_view.canvas.scale_factor
-                    )
-                    polygon_shapes.append(shape)
-            
-            # 合并多边形形状和之前处理的box形状
-            all_shapes = polygon_shapes 
-
-            # 完成处理
-            self.finish_processing_shapes(all_shapes)
-            
-        except Exception as e:
-            print(f"Error in on_polygon_processing_finished: {str(e)}")
-            print(traceback.format_exc())
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.accept()
-            QMessageBox.warning(self, "Error", f"处理多边形结果时出错: {str(e)}")
+        try:
+            if error:
+                raise error if isinstance(error, Exception) else RuntimeError(error)
+            output_dir = task.settings.get(
+                'save_path', macos_output_dir('Inference_OutPut') if sys.platform == 'darwin'
+                else os.path.join(os.getcwd(), 'Inference_OutPut'))
+            rejected = save_polygon_audit(processed_map, task.file_path, output_dir)
+            shapes = shapes_from_predictions(json_obj, processed_map, task.canvas)
+            self.finish_processing_shapes(shapes, task)
+            if rejected:
+                QMessageBox.warning(self, 'Skipped predictions',
+                                    f'{len(rejected)} predicted polygon(s) could not be converted '
+                                    'to valid shapes and were skipped. Details are in the postprocess audit.')
+        except Exception as error:
+            manager.finish(task)
+            if not isinstance(error, OperationCancelled):
+                QMessageBox.warning(self, 'Polygon processing error', str(error))
 
     # 添加一个新的辅助方法来完成处理
-    def finish_processing_shapes(self, shapes):
-        """完成形状处理并更新UI"""
-        try:
-            # 获取当前的画布
-            current_tab = self.tabWidget.currentWidget()
-            graphics_view = current_tab.property("graphics_view")
-            current_canvas = graphics_view.canvas
-            
-            # 将 shapes 存储到当前标签页的canvas中
-            current_canvas.shapes.extend(shapes)
-            current_canvas.update()
-            
-            # 更新列表
-            self.labeldockinstance.populate(current_canvas.shapes, Shape.get_color_by_classnum)
-            self.shapedockinstance.populate(current_canvas.shapes)
-            
-            # 设置模式为 edit 模式
-            current_canvas.set_mode('edit')
-            
-            # 模拟按下 edit 按钮
+    def finish_processing_shapes(self, shapes, task=None):
+        manager = task_manager(self)
+        if not manager.valid(task):
+            manager.finish(task)
+            return
+        canvas = task.canvas
+        # Preserve the existing append behavior; no replacement of user annotations.
+        canvas.save_state()
+        canvas.shapes.extend(shapes)
+        canvas.set_mode('edit')
+        canvas.update()
+        canvas.shapesChanged.emit()
+        if self.get_current_graphics_view() is task.view:
             self.actionEditShapes.setChecked(True)
             self.edit_shapes()
-            
-            # 更新进度条窗口的消息
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.update_message("Image analysis completed")
-                # 关闭进度条窗口
-                self.progress_dialog.accept()
-                
             self.update_actions_inToolBar()
-        except Exception as e:
-            print(f"Error in finish_processing_shapes: {str(e)}")
-            print(traceback.format_exc())
-            if hasattr(self, 'progress_dialog') and self.progress_dialog:
-                self.progress_dialog.accept()
-            QMessageBox.warning(self, "Error", f"完成形状处理时出错: {str(e)}")
+        manager.finish(task)
+
+    def closeEvent(self, event):
+        if not getattr(self, '_close_tabs_confirmed', False):
+            count = self.tabWidget.count()
+            if count:
+                answer = QMessageBox.question(
+                    self, 'Exit StomataQuant',
+                    f'You currently have {count} tab{"s" if count != 1 else ""} open.\n'
+                    'Some work may not have been saved.\n'
+                    'Are you sure you want to exit StomataQuant?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if answer != QMessageBox.Yes:
+                    event.ignore()
+                    return
+            self._close_tabs_confirmed = True
+        manager = task_manager(self)
+        batch = getattr(self, '_drop_batch', None)
+        if batch is not None and not batch.done:
+            batch.cancel()
+        self.measurement_controller.cancel_all()
+        if (manager.running() or self.measurement_controller.running()
+                or getattr(self, '_batch_running', False)
+                or (batch is not None and not batch.done)):
+            manager.cancel_all()
+            self._closing_requested = True
+            self.statusBar().showMessage('Waiting for the current processing stage to stop safely...', 5000)
+            QTimer.singleShot(100, self.close)
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
     #################################################################
@@ -2191,50 +2159,44 @@ class UIMainWindow(MainWindow):
     # The methods are related to the modification of the color of the shape.
     ####################################################################
 
-    def show_color_settings(self):
-        try:
-            current_shape = self.get_current_shapes()
-            if current_shape:
-                dialog = ColorSettingsDialog(self, Shape.color_map)
-                if dialog.exec_() == QtWidgets.QDialog.Accepted:
-                    new_color_map = dialog.get_color_map()
-                    Shape.set_color_map(new_color_map)
-                    # 保存颜色设置到 QSettings
-                    settings = QtCore.QSettings("StomaQuant", "GUI")
-                    for class_num, color in new_color_map.items():
-                        settings.setValue(f"colors/class_{class_num}", color)
-            
-                    # 更新已经绘制的形状
-                    self.update_shapes_appearance()
-            else:
-                QMessageBox.warning(self, "Notice", "No shapes.")
-        except Exception as e:
-            QMessageBox.warning(self, "Error", "Currently no image is open, please open an image first.")
+    def show_display_settings(self):
+        dialog = DisplaySettingsDialog(self, Shape.color_map, display.current)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            try:
+                self.apply_display_settings(dialog.get_color_map(), dialog.get_appearance())
+            except (ValueError, TypeError) as exc:
+                QMessageBox.warning(self, "Display Settings", str(exc))
 
-    def update_shapes_appearance(self):
-        """更新所有形状的外观"""
-        current_canvas = self.get_current_graphics_view().canvas
-        if current_canvas:
-            # 标记所有形状为脏状态，确保它们会被重绘
-            for shape in current_canvas.shapes:
-                shape._dirty = True
-            current_canvas.update()
-        
-        # 重新填充形状列表和标签列表，使用新的颜色设置
-        if hasattr(self, 'shapedockinstance') and hasattr(self, 'labeldockinstance'):
-            shapes = self.get_current_shapes()
-            # 更新ShapeListDock
-            self.shapedockinstance.populate(shapes)
-            # 更新LabelListDock
-            self.labeldockinstance.populate(shapes, Shape.get_color_by_classnum)
-            
-        # 更新形状列表和标签列表的显示
-        self.update_shapes_and_label_list()
-        
+    def apply_display_settings(self, color_map, appearance):
+        colors_changed = color_map != Shape.color_map
+        views = [self.tabWidget.widget(i).property("graphics_view") for i in range(self.tabWidget.count())]
+        canvases = [view.canvas for view in views if getattr(view, 'canvas', None) is not None]
+        # Notify Qt before changing the shared bounds. Shapes are painted by Canvas.
+        for canvas in canvases:
+            canvas.prepareGeometryChange()
+            for shape in canvas.shapes + ([canvas.current_shape] if canvas.current_shape else []):
+                shape.prepareGeometryChange()
+        Shape.set_color_map(color_map)
+        display.set_current(appearance)
+        settings = QtCore.QSettings("StomaQuant", "GUI")
+        for class_num, color in color_map.items():
+            settings.setValue(f"colors/class_{class_num}", color)
+        display.save(settings, appearance)
+        for canvas in canvases:
+            for shape in canvas.shapes + ([canvas.current_shape] if canvas.current_shape else []):
+                shape.appearance_changed()
+            canvas.update()
+        for view in views:
+            if getattr(view, 'canvas', None) is not None:
+                view.viewport().update()
+        # Appearance alone does not alter annotation lists, measurements or history.
+        if colors_changed:
+            self.update_shapes_and_label_list()
+
     def load_color_settings(self):
         """从 QSettings 加载颜色设置"""
         settings = QtCore.QSettings("StomaQuant", "GUI")
-        color_map = {}
+        color_map = dict(Shape.color_map)
         
         # 获取所有颜色设置的键
         settings_keys = settings.allKeys()
@@ -2254,7 +2216,7 @@ class UIMainWindow(MainWindow):
                     
                 if color.isValid():
                     color_map[class_num] = color
-            except (IndexError, ValueError) as e:
+            except (IndexError, ValueError, TypeError) as e:
                 print(f"Loading color setting error: {e}")
         
         # 如果有颜色设置，则应用它们
@@ -2269,6 +2231,7 @@ class UIMainWindow(MainWindow):
     def show_heatmap(self):
         """显示热图对话框并根据用户选择生成热图"""
         try:
+            target_tab = self.tabWidget.currentWidget()
             # 检查是否有图像和形状
             current_view = self.get_current_graphics_view()
             if not current_view or not current_view.pixmap_item:
@@ -2298,18 +2261,28 @@ class UIMainWindow(MainWindow):
                     QtWidgets.QMessageBox.Yes
                 )
                 if reply == QtWidgets.QMessageBox.Yes:
-                    self.feature_extraction_of_all_shapes()
+                    if not self.measurements_ready_for_export():
+                        return
                 else:
                     return
             
             # 创建并显示热图对话框
             dialog = HeatMapDialog(self)
             if dialog.exec_() == QtWidgets.QDialog.Accepted:
+                if (target_tab is None or sip.isdeleted(target_tab)
+                        or self.tabWidget.indexOf(target_tab) < 0
+                        or sip.isdeleted(current_view) or not current_view.canvas):
+                    return
+                shapes = [s for s in current_view.canvas.shapes if s.visible and s.shape_type == 'polygon']
                 settings = dialog.get_settings()
                 feature_name = settings["feature"]
                 colormap_name = settings["colormap"]
                 output_path = settings["output_path"]
-                scale_info = settings.get("scale_info")  # 获取比例尺信息
+                scale_info = resolve_scale(self, current_view)
+                errors = refresh_shapes(shapes, scale_info, force=True)
+                if errors:
+                    QMessageBox.warning(self, 'Measurement needs correction', '\n'.join(errors[:10]))
+                    return
                 
                 if not output_path:
                     QtWidgets.QMessageBox.warning(self, "Noticce", "Please select the save path.")
@@ -2319,13 +2292,11 @@ class UIMainWindow(MainWindow):
                 self.progress_dialog_heatmap = ProgressDialog(self)
                 self.progress_dialog_heatmap.update_message(f"Generating a heatmap based on {feature_name} is in progress....")
                 self.progress_dialog_heatmap.show()
-                QtWidgets.QApplication.processEvents()
                 
                 # 获取图像副本
                 current_pixmap = current_view.pixmap_item.pixmap()
                 image = current_pixmap.toImage()
-                current_tab = self.tabWidget.currentWidget()
-                file_path = current_tab.property("file_path") if current_tab else ""
+                file_path = target_tab.property("file_path")
             
                 # 创建并启动热图生成线程
                 
@@ -2333,8 +2304,11 @@ class UIMainWindow(MainWindow):
                 self.heatmap_thread = HeatMapGenerationThread(
                     image, shapes, feature_name, colormap_name, output_path, file_path, scale_info, self
                 )
-                self.heatmap_thread.heatmapGenerated.connect(self.on_heatmap_generated)
-                self.heatmap_thread.start()
+                manager = task_manager(self)
+                task = manager.begin(target_tab, 'heatmap', self.progress_dialog_heatmap)
+                self.heatmap_thread.heatmapGenerated.connect(
+                    lambda path, error, t=task: self.on_heatmap_generated(path, error, t))
+                manager.start(task, self.heatmap_thread)
 
 
         
@@ -2346,21 +2320,17 @@ class UIMainWindow(MainWindow):
             if hasattr(self, 'progress_dialog_heatmap'):
                 self.progress_dialog_heatmap.accept()
 
-    def on_heatmap_generated(self, file_path, error):
-        """热图生成完成后的回调"""
-        if hasattr(self, 'progress_dialog_heatmap'):
-            self.progress_dialog_heatmap.accept()
-        
+    def on_heatmap_generated(self, file_path, error, task=None):
+        manager = task_manager(self)
+        valid = manager.valid(task)
+        manager.finish(task)
+        if not valid:
+            return
         if error:
-            QtWidgets.QMessageBox.warning(self, "Error", f"An error occurred while generating the heatmap: {error}")
+            QMessageBox.warning(self, 'Error', str(error))
         elif file_path:
-            QtWidgets.QMessageBox.information(
-                self, 
-                "Saved successfully",
-                f"The heatmap generation was successful and saved to:\n{file_path}."
-            )
-        else:
-            QtWidgets.QMessageBox.warning(self, "Error", "An unknown error occurred during the generation of the heatmap.")
+            QMessageBox.information(self, 'Saved successfully',
+                                    f'The heatmap generation was successful and saved to:\n{file_path}')
 
     ####################################################################
     # 以下方法多边形/正方形注释的保存或者导入相关
@@ -2368,362 +2338,222 @@ class UIMainWindow(MainWindow):
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     ####################################################################
 
+    def change_point_class(self, shape, category):
+        """Compatibility entry point; metadata changes are shared by all shapes."""
+        self.change_shape_metadata([shape], 'classnum', str(category))
+
+    def _queue_metadata_edit(self, shapes, field, text):
+        view = self.get_current_graphics_view()
+        if view and view.canvas:
+            self.metadataCommit.emit((view.canvas, view.canvas._history_generation, list(shapes)), field, text)
+
+    def _apply_metadata_edit(self, context, field, text):
+        canvas, generation, shapes = context
+        view = self.get_current_graphics_view()
+        if view and view.canvas is canvas and canvas._history_generation == generation:
+            self.change_shape_metadata(shapes, field, text)
+
+    def change_shape_metadata(self, shapes, field, text):
+        """One undoable edit, bound to actual objects in the current image."""
+        tab = self.tabWidget.currentWidget()
+        if tab is None or field not in ('label', 'classnum') or not shapes:
+            return
+        canvas = require_target(self, tab)
+        current = {id(shape) for shape in canvas.shapes}
+        # A queued editor commit may arrive after tab switching, closing or undo.
+        if any(id(shape) not in current for shape in shapes):
+            return
+        targets = list({id(shape): shape for shape in shapes}.values())
+        if field == 'classnum':
+            from point_annotations import class_id
+            try:
+                category = class_id(text)
+            except ValueError as error:
+                QMessageBox.warning(self, 'Invalid class ID', str(error))
+                return
+            # Preserve the existing current-image lookup, before modifying any
+            # selected shape. Table sort order must never determine the mapping.
+            label = next((s.label for s in canvas.shapes
+                          if s.classnum == category and s.label), f'Class {category}')
+            changes = [(s, label, category) for s in targets if s.classnum != category]
+        else:
+            label = text.strip() or None  # Same convention as LabelInputDialog.
+            changes = [(s, label, s.classnum) for s in targets if s.label != label]
+        if not changes:
+            return
+        renames = {shape.label: label for shape, label, _ in changes}
+        canvas.save_state()
+        for shape, label, category in changes:
+            shape.label = label
+            shape.classnum = category
+            if shape.feature_results:
+                shape.feature_results['Label'] = label
+            shape.update_shape()
+        self.shapedockinstance.update_metadata([s for s, _, _ in changes])
+        self.labeldockinstance.sync_labels(canvas.shapes, Shape.get_color_by_classnum, renames)
+        canvas.update()
+        self._metadata_edit_in_progress = True
+        try:
+            canvas.shapesChanged.emit()
+        finally:
+            self._metadata_edit_in_progress = False
+        self.update_undo_button()
+        self.refresh_measurements()
+
+    def import_point(self):
+        tab = self.tabWidget.currentWidget()
+        if tab is None:
+            QMessageBox.warning(self, 'Notice', 'Please open an image file first.')
+            return
+        progress = None
+        try:
+            canvas = require_target(self, tab)
+            path, _ = QFileDialog.getOpenFileName(
+                self, 'Import Point Annotations', '', 'Text Files (*.txt);;All Files (*)')
+            if not path:
+                return
+            require_target(self, tab, canvas)
+            progress = QProgressDialog('Importing Point annotations...', 'Cancel', 0, 0, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(500)
+            count = import_points(canvas, path,
+                                  lambda: import_checkpoint(self, tab, canvas, progress),
+                                  getattr(self, '_global_show_group_id', False))
+            refresh_point_import(self, tab)
+            progress.close()
+            QMessageBox.information(self, 'Import Success', f'Successfully imported {count} Point annotations.')
+        except OperationCancelled:
+            pass
+        except Exception as error:
+            QMessageBox.critical(self, 'Error', f'Failed to import Point annotations: {error}')
+        finally:
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+
+    def save_point_annotation(self):
+        tab = self.tabWidget.currentWidget()
+        if tab is None:
+            QMessageBox.warning(self, 'Notice', 'Please open an image file first.')
+            return
+        try:
+            canvas = require_target(self, tab)
+            if not any(shape.shape_type == 'point' and shape.visible for shape in canvas.shapes):
+                QMessageBox.warning(self, 'Notice', 'No visible Point annotations to save.')
+                return
+            stem = os.path.splitext(os.path.basename(tab.property('file_path')))[0]
+            path, _ = QFileDialog.getSaveFileName(
+                self, 'Export Point Annotations',
+                f'Point_Annotation_Exported_by_StomataQuant_{stem}.txt',
+                'Text Files (*.txt);;All Files (*)')
+            if not path:
+                return
+            require_target(self, tab, canvas)
+            self._save_annotation_session_before_export(tab, canvas)
+            write_points(path, canvas)
+            self._mark_annotation_saved(tab)
+            QMessageBox.information(self, 'Success', 'Point annotations saved successfully!')
+        except Exception as error:
+            QMessageBox.critical(self, 'Error', f'Failed to save Point annotations: {error}')
+
+    def _require_active_annotation_target(self, tab, canvas=None):
+        if (tab is None or sip.isdeleted(tab) or self.tabWidget.currentWidget() is not tab):
+            raise ValueError('The target image was closed or changed during import.')
+        return require_target(self, tab, canvas)
+
+    def _commit_annotation_import(self, tab, canvas, shapes):
+        """Commit a fully parsed import as one undoable, signal-safe operation."""
+        if not shapes:
+            return False
+        self._require_active_annotation_target(tab, canvas)
+        canvas.save_state()
+        was_blocked = canvas.blockSignals(True)
+        try:
+            canvas.shapes.extend(shapes)
+        finally:
+            canvas.blockSignals(was_blocked)
+        canvas.update()
+        canvas.shapesChanged.emit()
+        self.update_shapes_and_label_list()
+        return True
+
+    def _import_shape_annotations(self, kind, title):
+        current_tab = self.tabWidget.currentWidget()
+        if not current_tab:
+            QMessageBox.warning(self, "Notice", "Please open an image file first.")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, title, "", "Text Files (*.txt);;All Files (*)")
+        if not file_path:
+            return
+
+        progress = None
+        try:
+            canvas = self._require_active_annotation_target(current_tab)
+            width, height = canvas.image_size.width(), canvas.image_size.height()
+            with open(file_path, 'r', encoding='utf-8-sig') as stream:
+                lines = stream.readlines()
+            require_annotation_text(lines)
+            table_header = rectangle_table_header_index(lines) if kind == 'rectangle' else None
+            progress = QProgressDialog(f"Importing {kind.replace('_', ' ')} annotations...",
+                                       "Cancel", 0, len(lines), self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(500)
+            pending, skipped, next_ids = [], [], {}
+            for number, line in enumerate(lines, 1):
+                if progress.wasCanceled():
+                    return
+                progress.setValue(number - 1)
+                QApplication.processEvents()
+                self._require_active_annotation_target(current_tab, canvas)
+                if not line.strip() or table_header == number - 1:
+                    continue
+                try:
+                    if table_header is not None:
+                        category, points, label = parse_rectangle_table_line(line, width, height)
+                    else:
+                        category, points = parse_annotation_line(line, kind, width, height)
+                        label = f"Class {category}"
+                except (ValueError, IndexError, OverflowError) as error:
+                    skipped.append((number, str(error)))
+                    continue
+                if category not in next_ids:
+                    ids = [shape.group_id for shape in canvas.shapes
+                           if shape.classnum == category and shape.group_id is not None]
+                    next_ids[category] = max([-1, *ids]) + 1
+                pending.append(Shape(label=label, classnum=category,
+                                     pointslist=points, shape_type=kind,
+                                     group_id=next_ids[category]))
+                next_ids[category] += 1
+            progress.setValue(len(lines))
+            if progress.wasCanceled():
+                return
+            self._commit_annotation_import(current_tab, canvas, pending)
+            warning = import_warning(skipped, len(pending))
+            if warning:
+                QMessageBox.warning(self, 'Annotation Import Warning', warning)
+            elif pending:
+                QMessageBox.information(self, "Import Success",
+                                        f"Successfully imported {len(pending)} {kind.replace('_', ' ')} annotations")
+            else:
+                QMessageBox.warning(self, "Warning", f"No {kind.replace('_', ' ')} annotations were imported.")
+        except Exception as error:
+            QMessageBox.critical(self, "Error",
+                                 f"An error occurred when importing the annotation file: {error}")
+        finally:
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+
     def import_polygon(self):
-        # Check if an image is open
-        current_tab = self.tabWidget.currentWidget()
-        if not current_tab:
-            QMessageBox.warning(self, "Notice", "Please open an image file first.")
-            return
+        self._import_shape_annotations('polygon', 'Import Annotation File')
 
-        # Open file dialog to select txt file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Annotation File", "", "Text Files (*.txt);;All Files (*)")
-
-        if not file_path:
-            return  # User cancelled operation
-
-        try:
-            # Get canvas and image dimensions
-            current_canvas = self.get_current_graphics_view().canvas
-            image_size = current_canvas.image_size
-            image_width = image_size.width()
-            image_height = image_size.height()
-
-            # Save current state for undo support
-            current_canvas.save_state()
-            
-            # Temporarily block signals - key optimization
-            current_canvas.blockSignals(True)
-
-            # Read file content and parse
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
-
-            # Create progress dialog
-            progress = QProgressDialog("Importing polygon annotations...", "Cancel", 0, len(lines), self)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(500)  # Only show if operation takes more than 500ms
-            
-            imported_count = 0
-            shapes_to_add = []  # Collect all shapes before adding them at once - key optimization
-            
-            # Group by class, to correctly assign group_id for each class
-            class_to_max_group_id = {}
-            
-            for i, line in enumerate(lines):
-                if progress.wasCanceled():
-                    break
-                    
-                progress.setValue(i)
-                QApplication.processEvents()  # Ensure UI remains responsive
-                
-                parts = line.strip().split()
-                if len(parts) < 5 or len(parts) % 2 == 0:  # Need at least class_id and two points
-                    continue
-
-                try:
-                    classnum = int(parts[0])
-                    points = []
-
-                    # Parse coordinates and convert back to pixel coordinates
-                    for i in range(1, len(parts), 2):
-                        if i + 1 < len(parts):
-                            x = float(parts[i]) * image_width
-                            y = float(parts[i + 1]) * image_height
-                            points.append(QPointF(x, y))
-
-                    if len(points) < 3:  # Polygon needs at least 3 points
-                        continue
-
-                    # Determine group_id - find maximum group_id with same classnum and add 1
-                    if classnum not in class_to_max_group_id:
-                        # Initialize maximum group_id for this class
-                        max_group_id = -1
-                        for shape in current_canvas.shapes:
-                            if shape.classnum == classnum and shape.group_id > max_group_id:
-                                max_group_id = shape.group_id
-                        class_to_max_group_id[classnum] = max_group_id
-                    
-                    # Assign new group_id
-                    class_to_max_group_id[classnum] += 1
-                    group_id = class_to_max_group_id[classnum]
-
-                    # Create new shape
-                    new_shape = Shape(
-                        label=f"Class {classnum}",  # Default label
-                        classnum=classnum,
-                        pointslist=points,
-                        shape_type='polygon',
-                        group_id=group_id
-                    )
-
-                    # Collect shape
-                    shapes_to_add.append(new_shape)
-                    imported_count += 1
-
-                except (ValueError, IndexError) as e:
-                    print(f"Error parsing line: {line}, Error: {e}")
-                    continue
-            
-            progress.setValue(len(lines))
-            
-            # Add all shapes at once - key optimization
-            if shapes_to_add:
-                # Use extend to add all shapes at once
-                current_canvas.shapes.extend(shapes_to_add)
-            
-            # Restore signals and update once - key optimization
-            current_canvas.blockSignals(False)
-            current_canvas.update()
-            current_canvas.shapesChanged.emit()
-            self.update_shapes_and_label_list()
-
-            if imported_count > 0:
-                QMessageBox.information(self, "Import Success", f"Successfully imported {imported_count} polygon annotations")
-            else:
-                QMessageBox.warning(self, "Warning", "No polygon annotations were imported.")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred when importing the annotation file: {str(e)}")
-    
     def import_rectangle(self):
-        # Check if an image is open
-        current_tab = self.tabWidget.currentWidget()
-        if not current_tab:
-            QMessageBox.warning(self, "Notice", "Please open an image file first.")
-            return
+        self._import_shape_annotations('rectangle', 'Import Rectangle Annotation File')
 
-        # Open file dialog to select txt file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Rectangle Annotation File", "", "Text Files (*.txt);;All Files (*)")
-
-        if not file_path:
-            return  # User cancelled operation
-
-        try:
-            # Get canvas and image dimensions
-            current_canvas = self.get_current_graphics_view().canvas
-            image_size = current_canvas.image_size
-            image_width = image_size.width()
-            image_height = image_size.height()
-
-            # Save current state for undo support
-            current_canvas.save_state()
-            
-            # Temporarily block signals - key optimization
-            current_canvas.blockSignals(True)
-
-            # Read file content and parse
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
-
-            # Create progress dialog
-            progress = QProgressDialog("Importing rectangle annotations...", "Cancel", 0, len(lines), self)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(500)  # Only show if operation takes more than 500ms
-            
-            imported_count = 0
-            shapes_to_add = []  # Collect all shapes before adding them at once
-            
-            # Group by class, to correctly assign group_id for each class
-            class_to_max_group_id = {}
-            
-            for i, line in enumerate(lines):
-                if progress.wasCanceled():
-                    break
-                    
-                progress.setValue(i)
-                QApplication.processEvents()  # Ensure UI remains responsive
-                
-                parts = line.strip().split()
-                if len(parts) != 5:  # YOLO format: class x_center y_center width height
-                    continue
-
-                try:
-                    classnum = int(parts[0])
-                    x_center = float(parts[1]) * image_width
-                    y_center = float(parts[2]) * image_height
-                    width = float(parts[3]) * image_width
-                    height = float(parts[4]) * image_height
-
-                    # Calculate top-left and bottom-right coordinates
-                    x1 = x_center - width / 2
-                    y1 = y_center - height / 2
-                    x2 = x_center + width / 2
-                    y2 = y_center + height / 2
-
-                    # Create two points: top-left and bottom-right
-                    top_left = QPointF(x1, y1)
-                    bottom_right = QPointF(x2, y2)
-
-                    # Determine group_id - find maximum group_id with same classnum and add 1
-                    if classnum not in class_to_max_group_id:
-                        # Initialize maximum group_id for this class
-                        max_group_id = -1
-                        for shape in current_canvas.shapes:
-                            if shape.classnum == classnum and shape.group_id > max_group_id:
-                                max_group_id = shape.group_id
-                        class_to_max_group_id[classnum] = max_group_id
-                    
-                    # Assign new group_id
-                    class_to_max_group_id[classnum] += 1
-                    group_id = class_to_max_group_id[classnum]
-
-                    # Create new shape
-                    new_shape = Shape(
-                        label=f"Class {classnum}",  # Default label
-                        classnum=classnum,
-                        pointslist=[top_left, bottom_right],
-                        shape_type='rectangle',
-                        group_id=group_id
-                    )
-
-                    # Collect shape
-                    shapes_to_add.append(new_shape)
-                    imported_count += 1
-
-                except (ValueError, IndexError) as e:
-                    print(f"Error parsing line: {line}, Error: {e}")
-                    continue
-            
-            progress.setValue(len(lines))
-            
-            # Add all shapes at once - key optimization
-            if shapes_to_add:
-                # Use extend to add all shapes at once
-                current_canvas.shapes.extend(shapes_to_add)
-            
-            # Restore signals and update once - key optimization
-            current_canvas.blockSignals(False)
-            current_canvas.update()
-            current_canvas.shapesChanged.emit()
-            self.update_shapes_and_label_list()
-
-            if imported_count > 0:
-                QMessageBox.information(self, "Import Success", f"Successfully imported {imported_count} rectangle annotations")
-            else:
-                QMessageBox.warning(self, "Warning", "No rectangle annotations were imported.")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred when importing the annotation file: {str(e)}")
-    
     def import_rotated_rectangle(self):
-        # Check if an image is open
-        current_tab = self.tabWidget.currentWidget()
-        if not current_tab:
-            QMessageBox.warning(self, "Notice", "Please open an image file first.")
-            return
+        self._import_shape_annotations('rotated_rectangle', 'Import Rotated Rectangle Annotation')
 
-        # Open file dialog to select txt file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Rotated Rectangle Annotation", "", "Text Files (*.txt);;All Files (*)")
-
-        if not file_path:
-            return  # User cancelled operation
-
-        try:
-            # Get canvas and image dimensions
-            current_canvas = self.get_current_graphics_view().canvas
-            image_size = current_canvas.image_size
-            image_width = image_size.width()
-            image_height = image_size.height()
-
-            # Save current state for undo support
-            current_canvas.save_state()
-            
-            # Temporarily block signals - key optimization
-            current_canvas.blockSignals(True)
-
-            # Read file content and parse
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
-
-            # Create progress dialog
-            progress = QProgressDialog("Importing rotated rectangle annotations...", "Cancel", 0, len(lines), self)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(500)  # Only show if operation takes more than 500ms
-            
-            imported_count = 0
-            shapes_to_add = []  # Collect all shapes before adding them at once
-            
-            # Group by class, to correctly assign group_id for each class
-            class_to_max_group_id = {}
-            
-            for i, line in enumerate(lines):
-                if progress.wasCanceled():
-                    break
-                    
-                progress.setValue(i)
-                QApplication.processEvents()  # Ensure UI remains responsive
-                
-                parts = line.strip().split()
-                if len(parts) != 9:  # OBB format: class x1 y1 x2 y2 x3 y3 x4 y4
-                    continue
-
-                try:
-                    classnum = int(parts[0])
-                    points = []
-
-                    # Parse four points' coordinates and convert back to pixel coordinates
-                    for i in range(1, 9, 2):
-                        x = float(parts[i]) * image_width
-                        y = float(parts[i + 1]) * image_height
-                        points.append(QPointF(x, y))
-
-                    if len(points) != 4:  # Ensure there are 4 points
-                        continue
-
-                    # Determine group_id - find maximum group_id with same classnum and add 1
-                    if classnum not in class_to_max_group_id:
-                        # Initialize maximum group_id for this class
-                        max_group_id = -1
-                        for shape in current_canvas.shapes:
-                            if shape.classnum == classnum and shape.group_id > max_group_id:
-                                max_group_id = shape.group_id
-                        class_to_max_group_id[classnum] = max_group_id
-                    
-                    # Assign new group_id
-                    class_to_max_group_id[classnum] += 1
-                    group_id = class_to_max_group_id[classnum]
-
-                    # Create new shape
-                    new_shape = Shape(
-                        label=f"Class {classnum}",  # Default label
-                        classnum=classnum,
-                        pointslist=points,
-                        shape_type='rotated_rectangle',
-                        group_id=group_id
-                    )
-
-                    # Collect shape
-                    shapes_to_add.append(new_shape)
-                    imported_count += 1
-
-                except (ValueError, IndexError) as e:
-                    print(f"Error parsing line: {line}, Error: {e}")
-                    continue
-            
-            progress.setValue(len(lines))
-            
-            # Add all shapes at once - key optimization
-            if shapes_to_add:
-                # Use extend to add all shapes at once
-                current_canvas.shapes.extend(shapes_to_add)
-            
-            # Restore signals and update once - key optimization
-            current_canvas.blockSignals(False)
-            current_canvas.update()
-            current_canvas.shapesChanged.emit()
-            self.update_shapes_and_label_list()
-
-            if imported_count > 0:
-                QMessageBox.information(self, "Import Success", f"Successfully imported {imported_count} rotated rectangle annotations")
-            else:
-                QMessageBox.warning(self, "Warning", "No rotated rectangle annotations were imported.")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred when importing the annotation file: {str(e)}")
-    
     def save_polygon_annotation(self):
         current_shapes = self.get_current_shapes()
         if not current_shapes:
@@ -2759,7 +2589,8 @@ class UIMainWindow(MainWindow):
             return
 
         try:
-            with open(file_path, 'w') as f:
+            canvas = self._require_active_annotation_target(current_tab)
+            with io.StringIO() as f:
                 for shape in current_shapes:
                     # 只处理polygon类型
                     if shape.shape_type != 'polygon' or not shape.visible:
@@ -2769,7 +2600,7 @@ class UIMainWindow(MainWindow):
                     # 添加类别编号
                     points.append(str(shape.classnum))
                     # 获取图片尺寸用于归一化坐标
-                    current_canvas = self.get_current_graphics_view().canvas
+                    current_canvas = canvas
                     image_size = current_canvas.image_size
                     image_width = image_size.width()
                     image_height = image_size.height()
@@ -2779,7 +2610,20 @@ class UIMainWindow(MainWindow):
                         y = point.y() / image_height
                         points.extend([f"{x:.6f}", f"{y:.6f}"])
                     # 写入一行
-                    f.write(' '.join(points) + '\n')
+                    line = ' '.join(points) + '\n'
+                    try:
+                        validate_polygon_export(line, image_width, image_height, file_path, [shape])
+                    except ValueError as error:
+                        if str(error).startswith('Invalid annotation:'):
+                            raise
+                        raise ValueError(f'Invalid annotation:\nLabel: {shape.label}\n'
+                                         f'Group ID: {shape.group_id}\nReason: {error}') from error
+                    f.write(line)
+                content = f.getvalue()
+                validate_polygon_export(content, image_width, image_height, file_path)
+                self._save_annotation_session_before_export(current_tab, canvas)
+                write_text_atomic(file_path, content)
+            self._mark_annotation_saved(current_tab)
 
             QMessageBox.information(self, "Success",
                                     "Annotation saved successfully!")
@@ -2823,14 +2667,15 @@ class UIMainWindow(MainWindow):
             return
 
         try:
-            with open(file_path, 'w') as f:
+            canvas = self._require_active_annotation_target(current_tab)
+            with io.StringIO() as f:
                 for shape in current_shapes:
                     # 只处理rectangle类型
                     if shape.shape_type != 'rectangle' or not shape.visible:
                         continue
 
                     # 获取图片尺寸用于归一化坐标
-                    current_canvas = self.get_current_graphics_view().canvas
+                    current_canvas = canvas
                     image_size = current_canvas.image_size
                     image_width = image_size.width()
                     image_height = image_size.height()
@@ -2848,6 +2693,13 @@ class UIMainWindow(MainWindow):
                     # YOLO格式: 类别编号 x中心 y中心 宽度 高度
                     line = f"{shape.classnum} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n"
                     f.write(line)
+                content = f.getvalue()
+                validate_rectangle_export(
+                    [shape for shape in current_shapes if shape.shape_type == 'rectangle' and shape.visible],
+                    content, 'rectangle', image_width, image_height, file_path)
+                self._save_annotation_session_before_export(current_tab, canvas)
+                write_text_atomic(file_path, content)
+            self._mark_annotation_saved(current_tab)
 
             QMessageBox.information(self, "Success",
                                     "Annotation saved successfully!")
@@ -2891,14 +2743,15 @@ class UIMainWindow(MainWindow):
             return
 
         try:
-            with open(file_path, 'w') as f:
+            canvas = self._require_active_annotation_target(current_tab)
+            with io.StringIO() as f:
                 for shape in current_shapes:
                     # 只处理rotated_rectangle类型
                     if shape.shape_type != 'rotated_rectangle' or not shape.visible:
                         continue
 
                     # 获取图片尺寸用于归一化坐标
-                    current_canvas = self.get_current_graphics_view().canvas
+                    current_canvas = canvas
                     image_size = current_canvas.image_size
                     image_width = image_size.width()
                     image_height = image_size.height()
@@ -2914,10 +2767,18 @@ class UIMainWindow(MainWindow):
                     for point in shape.pointslist:
                         x = point.x() / image_width
                         y = point.y() / image_height
-                        line += f" {x:.6f} {y:.6f}"
+                        line += f" {x:.17g} {y:.17g}"
 
                     line += "\n"
                     f.write(line)
+                content = f.getvalue()
+                validate_rectangle_export(
+                    [shape for shape in current_shapes
+                     if shape.shape_type == 'rotated_rectangle' and shape.visible],
+                    content, 'rotated_rectangle', image_width, image_height, file_path)
+                self._save_annotation_session_before_export(current_tab, canvas)
+                write_text_atomic(file_path, content)
+            self._mark_annotation_saved(current_tab)
 
             QMessageBox.information(self, "Success",
                                     "Rotated rectangle annotations saved successfully!")
@@ -2939,7 +2800,10 @@ class UIMainWindow(MainWindow):
     ####################################################################
 
     def shape_AllEdges_filter(self):
-        current_canvas = self.get_current_graphics_view().canvas
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return
+        current_canvas = view.canvas
         image_size = current_canvas.image_size
         image_width = image_size.width()
         image_height = image_size.height()
@@ -2947,18 +2811,22 @@ class UIMainWindow(MainWindow):
 
         shapes_to_delete = []
 
-        for shape in current_canvas.shapes:
-            bounding_rect = shape.get_bounding_rect()
-            if (bounding_rect.left() <= tolerance or
-                    bounding_rect.right() >= image_width - tolerance or
-                    bounding_rect.top() <= tolerance or
-                    bounding_rect.bottom() >= image_height - tolerance):
-                shapes_to_delete.append(shape)
+        prepared = self._collect_shape_batch(
+            current_canvas, 'Filtering shapes...',
+            lambda shape: shape if (
+                shape.get_bounding_rect().left() <= tolerance or
+                shape.get_bounding_rect().right() >= image_width - tolerance or
+                shape.get_bounding_rect().top() <= tolerance or
+                shape.get_bounding_rect().bottom() >= image_height - tolerance) else None)
+        if prepared is None:
+            return
+        shapes_to_delete = [shape for shape in prepared if shape is not None]
 
         if shapes_to_delete:
             current_canvas.save_state()  # 保存当前状态以支持撤销
-            for shape in shapes_to_delete:
-                current_canvas.shapes.remove(shape)
+            removed = {id(shape) for shape in shapes_to_delete}
+            current_canvas.shapes = [shape for shape in current_canvas.shapes
+                                     if id(shape) not in removed]
             current_canvas.update()
             current_canvas.shapesChanged.emit()
             self.update_canvas()
@@ -2966,7 +2834,10 @@ class UIMainWindow(MainWindow):
         print("All edges filter applied.")
 
     def shape_TopLeft_filter(self):
-        current_canvas = self.get_current_graphics_view().canvas
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return
+        current_canvas = view.canvas
         image_size = current_canvas.image_size
         # image_width = image_size.width()
         # image_height = image_size.height()
@@ -2974,16 +2845,20 @@ class UIMainWindow(MainWindow):
 
         shapes_to_delete = []
 
-        for shape in current_canvas.shapes:
-            bounding_rect = shape.get_bounding_rect()
-            if (bounding_rect.left() <= tolerance or
-                    bounding_rect.top() <= tolerance):
-                shapes_to_delete.append(shape)
+        prepared = self._collect_shape_batch(
+            current_canvas, 'Filtering shapes...',
+            lambda shape: shape if (
+                shape.get_bounding_rect().left() <= tolerance or
+                shape.get_bounding_rect().top() <= tolerance) else None)
+        if prepared is None:
+            return
+        shapes_to_delete = [shape for shape in prepared if shape is not None]
 
         if shapes_to_delete:
             current_canvas.save_state()
-            for shape in shapes_to_delete:
-                current_canvas.shapes.remove(shape)
+            removed = {id(shape) for shape in shapes_to_delete}
+            current_canvas.shapes = [shape for shape in current_canvas.shapes
+                                     if id(shape) not in removed]
             current_canvas.update()
             current_canvas.shapesChanged.emit()
             self.update_canvas()
@@ -2991,7 +2866,10 @@ class UIMainWindow(MainWindow):
         print("TopLeft filter applied.")
 
     def shape_RightBottom_filter(self):
-        current_canvas = self.get_current_graphics_view().canvas
+        view = self.get_current_graphics_view()
+        if view is None or view.canvas is None:
+            return
+        current_canvas = view.canvas
         image_size = current_canvas.image_size
         image_width = image_size.width()
         image_height = image_size.height()
@@ -2999,16 +2877,20 @@ class UIMainWindow(MainWindow):
 
         shapes_to_delete = []
 
-        for shape in current_canvas.shapes:
-            bounding_rect = shape.get_bounding_rect()
-            if (bounding_rect.right() >= image_width - tolerance or
-                    bounding_rect.bottom() >= image_height - tolerance):
-                shapes_to_delete.append(shape)
+        prepared = self._collect_shape_batch(
+            current_canvas, 'Filtering shapes...',
+            lambda shape: shape if (
+                shape.get_bounding_rect().right() >= image_width - tolerance or
+                shape.get_bounding_rect().bottom() >= image_height - tolerance) else None)
+        if prepared is None:
+            return
+        shapes_to_delete = [shape for shape in prepared if shape is not None]
 
         if shapes_to_delete:
             current_canvas.save_state()
-            for shape in shapes_to_delete:
-                current_canvas.shapes.remove(shape)
+            removed = {id(shape) for shape in shapes_to_delete}
+            current_canvas.shapes = [shape for shape in current_canvas.shapes
+                                     if id(shape) not in removed]
             current_canvas.update()
             current_canvas.shapesChanged.emit()
             self.update_canvas()
@@ -3022,24 +2904,24 @@ class UIMainWindow(MainWindow):
     ####################################################################
 
     def delete_selected_shape(self):
-        canvas = self.get_current_graphics_view().canvas
-        if canvas.selected_shape:
-            canvas.save_state()
-
-            # 创建副本以避免迭代时修改
-            selected_to_delete = canvas.selected_shape.copy()
-
-            for shape in selected_to_delete:
-                # 使用Canvas类的remove_shape方法完全移除形状
-                if shape in canvas.shapes:
-                    # 确保在删除前，形状引用正确的场景
-                    canvas.remove_shape(shape)
-                    shape.update_shape()
-
-            # 确保清空选择列表和其他引用
+        view = self.get_current_graphics_view()
+        if not view or not view.canvas:
+            return
+        canvas = view.canvas
+        selected = {id(s) for s in canvas.selected_shape}
+        targets = [s for s in canvas.shapes if id(s) in selected]
+        if not targets:
+            return
+        canvas.save_state()
+        blocker = QtCore.QSignalBlocker(canvas)
+        try:
+            for shape in targets:
+                canvas.remove_shape(shape)
             canvas.selected_shape = []
-
-            self.update_shapes_and_label_list()  # 更新列表显示
+        finally:
+            del blocker
+        canvas.shapeSelected.emit([])
+        canvas.shapesChanged.emit()
 
     def delete_all_shapes(self):
         """安全地删除所有形状"""
@@ -3065,28 +2947,27 @@ class UIMainWindow(MainWindow):
             reply = QMessageBox.question(self, 'Confirm Deletion', 'Do you want to delete all visible shapes?',
                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
+                if not any(shape.visible for shape in canvas.shapes):
+                    return
                 # 保存当前状态以支持撤销
                 canvas.save_state()
 
                 # 暂时禁止画布发送信号和更新
-                canvas.blockSignals(True)
+                was_blocked = canvas.blockSignals(True)
 
                 # 创建可见形状的副本以避免迭代时修改列表
                 visible_shapes = [shape for shape in canvas.shapes if shape.visible]
 
                 # 使用canvas的remove_shape方法正确删除每个形状
-                for shape in visible_shapes:
-                    canvas.remove_shape(shape)
-
-                # 清空选择
-                canvas.selected_shape = []
-
-                # 恢复信号发送和更新
-                canvas.blockSignals(False)
+                try:
+                    for shape in visible_shapes:
+                        canvas.remove_shape(shape)
+                    canvas.selected_shape = []
+                finally:
+                    canvas.blockSignals(was_blocked)
                 canvas.update()
-
-                # 一次性更新列表
-                self.update_shapes_and_label_list()
+                canvas.shapeSelected.emit([])
+                canvas.shapesChanged.emit()
                 
         except Exception as e:
             QMessageBox.warning(self, "Error", f"An error occurred: {str(e)}")
@@ -3131,7 +3012,11 @@ class SplashScreen(QSplashScreen):
         """)
         
         # 设置字体 - 修改为加粗字体
-        self.font = QFont("微软雅黑", 10, QFont.Bold)  # 添加 QFont.Bold 使字体加粗
+        if sys.platform == "darwin":
+            self.font = QFont()
+            self.font.setBold(True)
+        else:
+            self.font = QFont("微软雅黑", 10, QFont.Bold)  # 添加 QFont.Bold 使字体加粗
         self.setFont(self.font)
         
         # 保存当前消息
@@ -3215,13 +3100,22 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     app = QApplication(sys.argv)
     app_icon = QtGui.QIcon(":/ICON.png")
+    if sys.platform == 'darwin' and app_icon.isNull():
+        bundled_icon = macos_resource_path('ICON.png')
+        if bundled_icon:
+            app_icon = QtGui.QIcon(bundled_icon)
     app.setWindowIcon(app_icon)
-    font = QFont("微软雅黑", 10)
-    app.setFont(font)
+    if sys.platform == "win32":
+        font = QFont("微软雅黑", 10)
+        app.setFont(font)
 
     try:
         # 创建启动画面
         splash_pix = QPixmap(":/Start_up.png")  # 替换为你的启动画面图片路径
+        if sys.platform == 'darwin' and splash_pix.isNull():
+            bundled_splash = macos_resource_path('Start_up.png')
+            if bundled_splash:
+                splash_pix = QPixmap(bundled_splash)
         splash = SplashScreen(splash_pix)
         splash.show()
         
@@ -3269,5 +3163,3 @@ if __name__ == "__main__":
             QMessageBox.Ok
         )
         sys.exit(1)
-
-

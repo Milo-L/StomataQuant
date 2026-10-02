@@ -1,9 +1,20 @@
 #################### 功能实现--打开后的图片缩放
 from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene,QGraphicsPixmapItem
-from PyQt5.QtCore import pyqtSignal, Qt, QRectF
+from PyQt5.QtCore import pyqtSignal, Qt, QRectF, QSize
 from PyQt5.QtGui import QPixmap,QImageReader
 from canvas import Canvas
-import os   
+import os
+from display_settings import transform_scale
+
+
+def displayed_image_size(file_path):
+    """Dimensions after the same EXIF transform used by load_image."""
+    reader = QImageReader(str(file_path))
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid() and int(reader.transformation()) & 4:
+        return QSize(size.height(), size.width())
+    return size
 
 #ImageGraphicsView 的类，该类继承自 QGraphicsView，用于显示和缩放图像
 class ImageGraphicsView(QGraphicsView):
@@ -24,6 +35,31 @@ class ImageGraphicsView(QGraphicsView):
         self.dragging = False  # 初始化 dragging 标志
         self.canvas = None  # 初始化为 None
 
+    def sync_annotation_scale(self):
+        """Use the actual view transform; the percentage label is only a display."""
+        scale = transform_scale(self.transform())
+        self.current_zoom = scale * 100.0
+        if getattr(self, 'canvas', None) is not None:
+            self.canvas.set_scale_factor(scale)
+            self.canvas.update()
+        return scale
+
+    def setTransform(self, matrix, combine=False):
+        super().setTransform(matrix, combine)
+        self.sync_annotation_scale()
+
+    def resetTransform(self):
+        super().resetTransform()
+        self.sync_annotation_scale()
+
+    def scale(self, sx, sy):
+        super().scale(sx, sy)
+        self.sync_annotation_scale()
+
+    def fitInView(self, *args):
+        super().fitInView(*args)
+        self.sync_annotation_scale()
+
     def load_image(self, file_path):
         try:
             # 先检查文件是否存在
@@ -35,6 +71,9 @@ class ImageGraphicsView(QGraphicsView):
             
             # 尝试读取图像
             reader = QImageReader(file_path)
+            # Ultralytics/OpenCV applies JPEG EXIF orientation before inference.
+            # Display the same raster so Canvas and YOLO coordinates coincide.
+            reader.setAutoTransform(True)
             if not reader.canRead():
                 print(f"Error loading image:{file_path} from ImageGraphicsView.load_image_else_part")  # 调试信息
                 return False, "Cannot read file. Unsupported image format or corrupted file."
@@ -56,7 +95,7 @@ class ImageGraphicsView(QGraphicsView):
             image_size = pixmap.size()
             if self.canvas:
                 self.scene().removeItem(self.canvas)
-            self.canvas = Canvas(image_size)
+            self.canvas = Canvas(image_size, self.transform().m11())
             self.scene().addItem(self.canvas)
 
             # 确保 Canvas 在顶部
@@ -90,6 +129,7 @@ class ImageGraphicsView(QGraphicsView):
             self.pixmap_item = None
 
         # 添加新的 pixmap_item
+        self._pixel_image = pixmap.toImage()
         self.pixmap_item = self.scene().addPixmap(pixmap)
         self.pixmap_item.setZValue(0)  # 图像在 Canvas 之下
         print("New pixmap_item added")  # 调试信息
@@ -100,7 +140,7 @@ class ImageGraphicsView(QGraphicsView):
         self.resetTransform()
            # 设置当前缩放比例为 100%
         self.current_zoom = 100
-        self.zoomChanged.emit(self.current_zoom)
+        self.zoomChanged.emit(int(round(self.current_zoom)))
             # 确保图像加载完成后进行适应视口
         self.fit_to_view_custom()
 
@@ -138,7 +178,7 @@ class ImageGraphicsView(QGraphicsView):
             if self.pixmap_item:
                 pixmap = self.pixmap_item.pixmap()
                 if not pixmap.isNull():
-                    image = pixmap.toImage()
+                    image = self._pixel_image
                     if 0 <= x < image.width() and 0 <= y < image.height():
                         color = image.pixelColor(x, y)
                         r, g, b = color.red(), color.green(), color.blue()
@@ -204,25 +244,14 @@ class ImageGraphicsView(QGraphicsView):
         elif new_zoom > 1000:
             new_zoom = 1000
 
-        scale_factor = new_zoom / self.current_zoom
+        scale_factor = new_zoom / (100.0 * transform_scale(self.transform()))
         self.scale(scale_factor, scale_factor)
-        self.current_zoom = new_zoom
-        
-        # 自动同步 Canvas 的缩放因子
-        if self.canvas:
-            self.canvas.set_scale_factor(new_zoom / 100.0)
-        
-        self.zoomChanged.emit(int(self.current_zoom))
+        self.zoomChanged.emit(int(round(self.current_zoom)))
         
     def fit_to_view_custom(self):
         if self.pixmap_item:
             # 使用 fitInView 自动调整图像大小，保持纵横比
             self.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
             
-            # 获取当前的缩放比例
-            transform = self.transform()
-            scale_factor = transform.m11()  # 假设横向和纵向缩放相同
-            self.current_zoom = int(scale_factor * 100)
-            
             # 发射缩放变化信号
-            self.zoomChanged.emit(self.current_zoom)
+            self.zoomChanged.emit(int(round(self.current_zoom)))

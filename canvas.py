@@ -1,3 +1,6 @@
+from shape_spatial import Grid, ShapeList
+from shape_history import History, shape_identity
+import display_settings as display
 # canvas.py
 from PIL.FtexImagePlugin import Format
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -7,16 +10,27 @@ from matplotlib import scale
 from shape import Shape
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.ops import unary_union
+from shapely.strtree import STRtree
 import numpy as np
-import numba
+import copy
+try:
+    import numba
+except ImportError:
+    numba = None
+from geometry import (repair_polygon, ProcessedPolygons, minimum_rectangle_size,
+                      rectangle_side_lengths, MIN_POLYGON_VERTICES, require_valid_polygon,
+                      polygon_moments)
+from task_support import check_cancelled
 
 
 
-USE_NUMBA = True  # 默认启用 Numba
+USE_NUMBA = numba is not None  # Acceleration is optional
 
 
 def check_numba():
     """检查 Numba 是否可用，如果出现错误则禁用"""
+    if numba is None:
+        return False
     try:
         @numba.jit(nopython=True, cache=True)
         def test_func(x, y):
@@ -33,179 +47,169 @@ def check_numba():
 # Global function, post-processing for the resulting polygons after reasoning
 ######################################################################
 
-def process_polygon_data(class_polygons_dict, image_width=None, image_height=None):
+def process_polygon_data(class_polygons_dict, image_width=None, image_height=None, cancel_check=None):
     """
     完整处理多边形数据，包括移除内部点、处理离群点，并确保多边形有效性
     返回:
     处理后的多边形字典
     """
     # 首先处理内部点重叠
-    processed_dict = optimized_process_raw_polygons(class_polygons_dict)
+    processed_dict = optimized_process_raw_polygons(class_polygons_dict, cancel_check=cancel_check)
     # 然后处理离群点，传入图像尺寸
+    check_cancelled(cancel_check)
     cleaned_dict = remove_outlier_points(processed_dict, image_width=image_width, image_height=image_height)
     # 最后确保所有多边形都是有效的
+    check_cancelled(cancel_check)
     final_dict = validate_and_fix_polygons(cleaned_dict)
+    overlap_audit = {(r['classnum'], r['index']): r for r in processed_dict.audit}
+    for record in final_dict.audit:
+        xs, ys = class_polygons_dict[record['classnum']][record['index']]
+        record['source_x'], record['source_y'] = list(xs), list(ys)
+        prior = overlap_audit[record['classnum'], record['index']]
+        if prior['status'] != 'unchanged' and record['status'] != 'rejected':
+            record.update({k: v for k, v in prior.items()
+                           if k in ('status', 'reason', 'proposed_area_after')})
+        if record['status'] == 'rejected':
+            final_dict[record['classnum']][record['index']] = None
+            continue
+        if len(xs) >= 3 and len(xs) == len(ys) and np.isfinite(list(zip(xs, ys))).all():
+            source = Polygon(zip(xs, ys))
+            source_area = source.area
+            record['source_area'] = record['area_before'] = source_area
+            after = record['area_after']
+            change = ((after-source_area)/source_area if source_area and after is not None else None)
+            record['total_area_change'] = change
+            record['relative_area_change'] = abs(change) if change is not None else None
+            output = final_dict[record['classnum']][record['index']]
+            if source.is_valid and not source.equals(Polygon(zip(*output))):
+                if change is not None and abs(change) > .01:
+                    record.update(status='modified', reason='Total contour area change exceeds 1%')
+                elif record['status'] == 'unchanged':
+                    record.update(status='repaired', reason='Contour geometry changed during post-processing')
+        output = final_dict[record['classnum']][record['index']]
+        try:
+            x_values, y_values = output
+            points = [QPointF(x, y) for x, y in zip(x_values, y_values)]
+            if len(x_values) != len(y_values) or len({(p.x(), p.y()) for p in points}) < MIN_POLYGON_VERTICES:
+                raise ValueError(f'Polygon requires at least {MIN_POLYGON_VERTICES} distinct vertices.')
+            require_valid_polygon(points)
+            polygon_moments(points)
+            if image_width and image_height:
+                # Validate the exact six-decimal geometry that Save -> Import will use.
+                from annotation_io import parse_annotation_line
+                line = '0 ' + ' '.join(f'{value:.6f}' for p in points
+                                      for value in (p.x()/image_width, p.y()/image_height))
+                parse_annotation_line(line, 'polygon', image_width, image_height)
+            record['processed_x'], record['processed_y'] = list(x_values), list(y_values)
+        except Exception as error:
+            record.update(status='rejected', reason=str(error))
+            final_dict[record['classnum']][record['index']] = None
     print('processing polygon data is finished')
     return final_dict
 
-def optimized_process_raw_polygons(class_polygons_dict):
+def _robust_point_in_polygon_python(point_x, point_y, vertices_x, vertices_y, tolerance=1e-9):
+    """更稳健的点在多边形内测试，处理边界情况"""
+    n = len(vertices_x)
+    inside = False
+    on_edge = False
+    j = n - 1
+
+    for i in range(n):
+        # 检查点是否在多边形顶点上
+        if abs(vertices_x[i] - point_x) < tolerance and abs(vertices_y[i] - point_y) < tolerance:
+            return True, False  # 在顶点上
+
+        # 检查点是否在多边形边上
+        if (((vertices_y[i] <= point_y and point_y < vertices_y[j]) or
+            (vertices_y[j] <= point_y and point_y < vertices_y[i])) and
+            (point_x < (vertices_x[j] - vertices_x[i]) * (point_y - vertices_y[i]) / 
+            (vertices_y[j] - vertices_y[i]) + vertices_x[i])):
+            inside = not inside
+
+        # 检查点是否在边上
+        if (min(vertices_x[i], vertices_x[j]) <= point_x <= max(vertices_x[i], vertices_x[j]) and
+            min(vertices_y[i], vertices_y[j]) <= point_y <= max(vertices_y[i], vertices_y[j])):
+            # 计算点到线段的距离
+            if abs(vertices_y[j] - vertices_y[i]) < tolerance:  # 水平线
+                if abs(point_y - vertices_y[i]) < tolerance:
+                    on_edge = True
+            elif abs(vertices_x[j] - vertices_x[i]) < tolerance:  # 垂直线
+                if abs(point_x - vertices_x[i]) < tolerance:
+                    on_edge = True
+            else:  # 一般线段
+                # 计算点到线的距离
+                dist = abs((vertices_y[j] - vertices_y[i]) * point_x - 
+                            (vertices_x[j] - vertices_x[i]) * point_y + 
+                            vertices_x[j] * vertices_y[i] - vertices_y[j] * vertices_x[i]) / \
+                    np.sqrt((vertices_y[j] - vertices_y[i])**2 + (vertices_x[j] - vertices_x[i])**2)
+                if dist < tolerance:
+                    on_edge = True
+
+        j = i
+
+    return inside, on_edge
+
+
+def optimized_process_raw_polygons(class_polygons_dict, cancel_check=None):
+    """Subtract actual overlap, preserving every non-overlapping region.
+
+    Earlier contours own overlapping area. Shapes with holes, multiple components
+    or no remaining area cannot be represented by a single editable contour;
+    retain a valid original contour and record the overlap in the audit.
     """
-    优化处理多边形数据，删除位于其他多边形内部的点
-
-    处理逻辑:
-    1. 对每一类别单独处理
-    2. 计算所有多边形的包围盒并按面积从大到小排序
-    3. 记录每个多边形可能相交的其他多边形(通过包围盒相交判断)
-    4. 按面积从大到小处理多边形，删除位于其他多边形内部的点
-
-    参数:
-    class_polygons_dict: 字典，键为classnum，值为该类的多边形点列表
-
-    返回:
-    处理后的多边形字典
-    """
-    global USE_NUMBA
-    result_polygons_dict = {}
-
-    # 对每个类别分别处理
+    result = ProcessedPolygons()
     for classnum, polygons in class_polygons_dict.items():
-        result_polygons_dict[classnum] = []
-
-        # 如果该类别只有一个多边形，不需要处理
-        if len(polygons) <= 1:
-            result_polygons_dict[classnum] = polygons
-            continue
-
-        # 1. 计算所有多边形的包围盒及其面积
-        bounding_boxes = []
-        for i, (points_x, points_y) in enumerate(polygons):
-            if len(points_x) <= 3:  # 点数太少，直接标记
-                bounding_boxes.append((i, None, 0))  # (索引，包围盒，面积)
-                continue
-
-            min_x, max_x = min(points_x), max(points_x)
-            min_y, max_y = min(points_y), max(points_y)
-            bbox = (min_x, min_y, max_x, max_y)
-            area = (max_x - min_x) * (max_y - min_y)  # 计算包围盒面积
-            bounding_boxes.append((i, bbox, area))
-
-        # 2. 按照包围盒面积从大到小排序
-        bounding_boxes.sort(key=lambda x: x[2], reverse=True)
-
-        # 3. 预先计算可能相交的多边形(包围盒相交测试)
-        potential_intersections = {}
-        for i, (idx_i, bbox_i, _) in enumerate(bounding_boxes):
-            if bbox_i is None:
-                continue
-
-            potential_intersections[idx_i] = []
-            min_x_i, min_y_i, max_x_i, max_y_i = bbox_i
-
-            for j, (idx_j, bbox_j, _) in enumerate(bounding_boxes):
-                if idx_i == idx_j or bbox_j is None:
-                    continue
-
-                min_x_j, min_y_j, max_x_j, max_y_j = bbox_j
-
-                # 检查包围盒是否相交
-                if (min_x_i <= max_x_j and max_x_i >= min_x_j and
-                        min_y_i <= max_y_j and max_y_i >= min_y_j):
-                    potential_intersections[idx_i].append(idx_j)
-
-        # 4. 按照包围盒面积从大到小处理多边形
-        for idx_i, bbox_i, _ in bounding_boxes:
-            if bbox_i is None:
-                # 直接添加点数太少的多边形
-                result_polygons_dict[classnum].append(polygons[idx_i])
-                continue
-
-            points_x, points_y = polygons[idx_i]
-
-            # 如果点数太少，直接添加不处理
-            if len(points_x) <= 3:
-                result_polygons_dict[classnum].append((points_x, points_y))
-                continue
-
-            # 转换为numpy数组提高性能
-            np_points_x = np.array(points_x)
-            np_points_y = np.array(points_y)
-
-            # 标记需要保留的点
-            keep_mask = np.ones(len(np_points_x), dtype=bool)
-
-            # 5. 检查点是否在其他可能相交的多边形内部
-            for idx_j in potential_intersections.get(idx_i, []):
-                other_points_x, other_points_y = polygons[idx_j]
-
-                # 如果点数太少，跳过
-                if len(other_points_x) <= 3:
-                    continue
-
-                np_other_x = np.array(other_points_x)
-                np_other_y = np.array(other_points_y)
-
-                # 使用Numba加速或纯Python处理
-                if USE_NUMBA:
-                    try:
-                        # 检查点是否在其他多边形内部或边界上
-                        sub_mask = _improved_remove_points_inside_other_polygon(
-                            np_points_x, np_points_y, np_other_x, np_other_y)
-                        # 更新总mask
-                        keep_mask = keep_mask & sub_mask
-                    except Exception as e:
-                        print(f"Numba加速失败: {e}")
-                        USE_NUMBA = False
-
-                # 降级到纯Python处理
-                if not USE_NUMBA:
-                    for k in range(len(points_x)):
-                        if keep_mask[k]:  # 只检查还没被标记删除的点
-                            on_edge = False
-                            in_poly = _point_in_polygon_numba(points_x[k], points_y[k],
-                                                              other_points_x, other_points_y)
-
-                            # 额外检查点是否在多边形边上
-                            if not in_poly:
-                                for edge_i in range(len(other_points_x)):
-                                    edge_j = (edge_i + 1) % len(other_points_x)
-                                    x1, y1 = other_points_x[edge_i], other_points_y[edge_i]
-                                    x2, y2 = other_points_x[edge_j], other_points_y[edge_j]
-
-                                    # 简化的边界检测
-                                    if (min(x1, x2) <= points_x[k] <= max(x1, x2) and
-                                            min(y1, y2) <= points_y[k] <= max(y1, y2)):
-
-                                        # 计算点到线段的距离
-                                        dist_to_line = abs(
-                                            (y2 - y1) * points_x[k] - (x2 - x1) * points_y[k] + x2 * y1 - y2 * x1) / \
-                                                       np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) if ((y2 - y1) ** 2 + (
-                                                    x2 - x1) ** 2) > 1e-10 else float('inf')
-
-                                        if dist_to_line < 1e-6:
-                                            on_edge = True
-                                            break
-
-                            # 如果点在多边形内部或边上，标记为删除
-                            if in_poly or on_edge:
-                                keep_mask[k] = False
-
-            # 6. 根据保留掩码更新点列表
-            if not all(keep_mask) and sum(keep_mask) >= 3:  # 确保删除后至少有3个点
-                new_points_x = [points_x[k] for k in range(len(points_x)) if keep_mask[k]]
-                new_points_y = [points_y[k] for k in range(len(points_y)) if keep_mask[k]]
-
-                # 额外验证：确保新多边形有效且没有重复点
-                unique_points = set(zip(new_points_x, new_points_y))
-                if len(unique_points) >= 3:
-                    result_polygons_dict[classnum].append((new_points_x, new_points_y))
-                else:
-                    # 如果删除后点数不足或重合点，保留原始多边形
-                    result_polygons_dict[classnum].append((points_x, points_y))
-            else:
-                # 如果没有点需要删除或删除后点数不足，保留原始点
-                result_polygons_dict[classnum].append((points_x, points_y))
-
-    return result_polygons_dict
+        result[classnum] = []
+        # Index the original valid contours once. Ownership is still determined
+        # by input order; only earlier contours whose bounds intersect can
+        # subtract area from the current one.
+        indexed = []
+        positions = []
+        by_position = {}
+        for index, (xs, ys) in enumerate(polygons):
+            if index % 256 == 0:
+                check_cancelled(cancel_check)
+            if len(xs) >= 3 and len(xs) == len(ys) and np.isfinite(list(zip(xs, ys))).all():
+                polygon = Polygon(zip(xs, ys))
+                if polygon.is_valid and polygon.area > 0:
+                    indexed.append(polygon)
+                    positions.append(index)
+                    by_position[index] = polygon
+        tree = STRtree(indexed) if indexed else None
+        for index, (xs, ys) in enumerate(polygons):
+            check_cancelled(cancel_check)
+            original = (list(xs), list(ys))
+            output = original
+            record = {'classnum': classnum, 'index': index, 'status': 'unchanged'}
+            polygon = by_position.get(index)
+            if polygon is not None:
+                    record['area_before'] = polygon.area
+                    candidates = sorted(int(i) for i in tree.query(polygon, predicate='intersects')
+                                        if positions[int(i)] < index)
+                    if candidates:
+                        occupied = indexed[candidates[0]]
+                        for candidate in candidates[1:]:
+                            occupied = occupied.union(indexed[candidate])
+                        difference = polygon.difference(occupied)
+                    else:
+                        difference = polygon
+                    if not difference.equals(polygon):
+                        record['proposed_area_after'] = difference.area
+                        if (difference.geom_type == 'Polygon' and not difference.is_empty
+                                and not difference.interiors and difference.area > 0):
+                            coordinates = list(difference.exterior.coords)[:-1]
+                            output = ([p[0] for p in coordinates], [p[1] for p in coordinates])
+                            change = abs(difference.area-polygon.area)/polygon.area
+                            record.update(status='modified' if change > .01 else 'repaired',
+                                          reason='Overlap removed by polygon difference')
+                        else:
+                            record.update(status='overlap_retained',
+                                          reason='Overlap subtraction requires multiple contours or holes; original retained')
+                    record['area_after'] = Polygon(zip(*output)).area
+                    record['relative_area_change'] = abs(record['area_after']-polygon.area)/polygon.area
+            result[classnum].append(output)
+            result.audit.append(record)
+    return result
 
 def remove_outlier_points(class_polygons_dict, angle_threshold=15, dist_factor=2.0, image_width=None,
                           image_height=None):
@@ -450,116 +454,25 @@ def filter_outlier_points(points, angle_threshold=15, dist_factor=2.0):
         else:
             outlier_score[i] = 0
 
-    # 处理评分结果 (保持原有逻辑不变)
-    # ...其余代码保持不变...
+    candidates = [(i, score) for i, score in enumerate(outlier_score) if score > 70]
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    max_outliers = n // 50 if n > 50 else n // 100
+    removed = {i for i, _ in candidates[:max_outliers]}
+    filtered_points = [point for i, point in enumerate(points) if i not in removed]
+    return filtered_points if len(filtered_points) >= 3 else points
 
-    return filtered_points
 
 def validate_and_fix_polygons(class_polygons_dict):
-    """
-    验证并修复多边形，确保它们符合Shapely的有效性标准
+    result = ProcessedPolygons()
+    for classnum, polygons in class_polygons_dict.items():
+        result[classnum] = []
+        for index, (xs, ys) in enumerate(polygons):
+            repaired, record = repair_polygon(xs, ys)
+            result[classnum].append(repaired)
+            record.update(classnum=classnum, index=index)
+            result.audit.append(record)
+    return result
 
-    参数:
-    class_polygons_dict: 字典，键为classnum，值为该类的多边形点列表
-
-    返回:
-    修复后的多边形字典
-    """
-    try:
-
-        result_dict = {}
-
-        for classnum, polygons in class_polygons_dict.items():
-            result_dict[classnum] = []
-
-            for points_x, points_y in polygons:
-
-                if len(points_x) < 20:
-                    result_dict[classnum].append((points_x, points_y))  # 保留原始点，后续处理可能会丢弃
-                    continue
-
-                # 创建点坐标对
-                coords = [(x, y) for x, y in zip(points_x, points_y)]
-                # 继续处理点数≥20的多边形...
-                # 移除重复点
-                unique_coords = []
-                for i, coord in enumerate(coords):
-                    if i == 0 or coord != coords[i - 1]:
-                        unique_coords.append(coord)
-
-                # 确保多边形闭合（第一个点等于最后一个点）
-                if len(unique_coords) >= 3 and unique_coords[0] != unique_coords[-1]:
-                    unique_coords.append(unique_coords[0])
-
-                # 创建Shapely多边形并尝试修复
-                try:
-                    poly = Polygon(unique_coords)
-
-                    # 检查多边形是否有效
-                    if not poly.is_valid:
-                        # 尝试使用buffer(0)技巧修复自相交
-                        fixed_poly = poly.buffer(0)
-
-                        # 如果结果是MultiPolygon，取最大的部分
-                        if isinstance(fixed_poly, MultiPolygon):
-                            if not fixed_poly.is_empty:
-                                fixed_poly = max(fixed_poly.geoms, key=lambda x: x.area)
-                            else:
-                                continue  # 跳过空的MultiPolygon
-                    else:
-                        fixed_poly = poly
-
-                    # 如果仍然无效或者是空的，尝试凸包
-                    if not fixed_poly.is_valid or fixed_poly.is_empty:
-                        try:
-                            from scipy.spatial import ConvexHull
-                            points = np.array(unique_coords)
-                            if len(points) < 3:
-                                continue  # 跳过点数不足的情况
-                            hull = ConvexHull(points)
-                            hull_points = points[hull.vertices]
-                            fixed_poly = Polygon(hull_points)
-                        except ImportError:
-                            print("警告: scipy库不可用，无法使用凸包修复")
-                            # 尝试简单移除可能导致问题的点
-                            if len(unique_coords) > 4:  # 确保有足够的点可以删除
-                                reduced_coords = unique_coords[::2]  # 隔一个取一个点
-                                if len(reduced_coords) >= 3:
-                                    fixed_poly = Polygon(reduced_coords)
-
-                    # 如果还是无效，使用简化算法
-                    if not fixed_poly.is_valid and hasattr(fixed_poly, 'simplify'):
-                        fixed_poly = fixed_poly.simplify(0.5)
-
-                    # 如果最终多边形有效，提取其坐标
-                    if fixed_poly.is_valid and not fixed_poly.is_empty:
-                        x, y = fixed_poly.exterior.xy
-                        fixed_x = list(x)
-                        fixed_y = list(y)
-
-                        # 确保结果至少有3个唯一点
-                        if len(set(zip(fixed_x, fixed_y))) >= 3:
-                            result_dict[classnum].append((fixed_x, fixed_y))
-                        else:
-                            # 如果修复后点数不足，尝试保留原始点
-                            if len(set(zip(points_x, points_y))) >= 3:
-                                result_dict[classnum].append((points_x, points_y))
-                    else:
-                        # 如果所有修复尝试都失败，保留原始点（如果它们足够多）
-                        if len(set(zip(points_x, points_y))) >= 3:
-                            result_dict[classnum].append((points_x, points_y))
-
-                except Exception as e:
-                    print(f"处理多边形时出错: {e}")
-                    # 发生错误时保留原始点（如果它们足够多）
-                    if len(set(zip(points_x, points_y))) >= 3:
-                        result_dict[classnum].append((points_x, points_y))
-
-        return result_dict
-
-    except ImportError:
-        print("警告: Shapely库不可用，跳过多边形验证")
-        return class_polygons_dict  # 如果Shapely不可用，返回原始数据
 
 ######################################################################
 # 全局函数，使用Numba加速计算
@@ -765,48 +678,7 @@ if USE_NUMBA:
 
             return outlier_scores
         
-        @numba.jit(nopython=True, cache=True)
-        def _robust_point_in_polygon(point_x, point_y, vertices_x, vertices_y, tolerance=1e-9):
-            """更稳健的点在多边形内测试，处理边界情况"""
-            n = len(vertices_x)
-            inside = False
-            on_edge = False
-            j = n - 1
-            
-            for i in range(n):
-                # 检查点是否在多边形顶点上
-                if abs(vertices_x[i] - point_x) < tolerance and abs(vertices_y[i] - point_y) < tolerance:
-                    return True, False  # 在顶点上
-                    
-                # 检查点是否在多边形边上
-                if (((vertices_y[i] <= point_y and point_y < vertices_y[j]) or
-                    (vertices_y[j] <= point_y and point_y < vertices_y[i])) and
-                    (point_x < (vertices_x[j] - vertices_x[i]) * (point_y - vertices_y[i]) / 
-                    (vertices_y[j] - vertices_y[i]) + vertices_x[i])):
-                    inside = not inside
-                    
-                # 检查点是否在边上
-                if (min(vertices_x[i], vertices_x[j]) <= point_x <= max(vertices_x[i], vertices_x[j]) and
-                    min(vertices_y[i], vertices_y[j]) <= point_y <= max(vertices_y[i], vertices_y[j])):
-                    # 计算点到线段的距离
-                    if abs(vertices_y[j] - vertices_y[i]) < tolerance:  # 水平线
-                        if abs(point_y - vertices_y[i]) < tolerance:
-                            on_edge = True
-                    elif abs(vertices_x[j] - vertices_x[i]) < tolerance:  # 垂直线
-                        if abs(point_x - vertices_x[i]) < tolerance:
-                            on_edge = True
-                    else:  # 一般线段
-                        # 计算点到线的距离
-                        dist = abs((vertices_y[j] - vertices_y[i]) * point_x - 
-                                    (vertices_x[j] - vertices_x[i]) * point_y + 
-                                    vertices_x[j] * vertices_y[i] - vertices_y[j] * vertices_x[i]) / \
-                            np.sqrt((vertices_y[j] - vertices_y[i])**2 + (vertices_x[j] - vertices_x[i])**2)
-                        if dist < tolerance:
-                            on_edge = True
-                
-                j = i
-                
-            return inside, on_edge
+        _robust_point_in_polygon = numba.jit(nopython=True, cache=True)(_robust_point_in_polygon_python)
 
         @numba.jit(nopython=True, cache=True)
         def _improved_remove_points_inside_other_polygon(polygon_points_x, polygon_points_y, 
@@ -844,6 +716,11 @@ class Canvas(QtWidgets.QGraphicsObject):
     def __init__(self, image_size, scale_factor=1.0, parent=None):
         super(Canvas, self).__init__(parent)
         self.mode = 'edit'  # 可选值：'edit' 或 'create'
+        self._spatial = Grid()
+        self._shape_by_id = {}
+        self._measurement_dirty = set()
+        self._measurement_removed = set()
+        self._measurement_scale_version = 0
         self.shapes = []
         self.selected_shape = []  # 存储多个选中的形状
         self.hovered_shape = None
@@ -858,8 +735,16 @@ class Canvas(QtWidgets.QGraphicsObject):
         self.drawing = False  # 是否正在绘制
         self.rotating = False  # 是否正在旋转"旋转矩形“
         self.scaling_rotated_rectangle = False  # 是否正在缩放“旋转矩形”
+        self._edit_before = None
+        self._edit_original = ()
+        self._history = History()
+        self._history_generation = 0
+        self._history_pending = None
+        self._restoring_history = False
+        self.shapesChanged.connect(self._commit_pending_history)
         self.undo_stack = [] # 维护一个操作栈，用于保存历史状态
         #self.current_cursor = QtCore.Qt.ArrowCursor  # 缓存当前光标状态
+        self.setFlag(QtWidgets.QGraphicsItem.ItemUsesExtendedStyleOption, True)
         self.setAcceptHoverEvents(True)
         self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
         # 确保 Canvas 能接收场景更新
@@ -875,21 +760,131 @@ class Canvas(QtWidgets.QGraphicsObject):
 # 基本方法，多在入口文件中被调用
 # The basic method is mostly called in the entry file.
 #######################################################################################
+    @property
+    def shapes(self):
+        return self._shapes
+
+    @shapes.setter
+    def shapes(self, value):
+        old = list(getattr(self, '_shapes', ()))
+        value = list(value)
+        self.measurement_validate_members(value, old)
+        if hasattr(self, '_shapes'):
+            self._shapes.owner = lambda: None
+        self._shapes = ShapeList(value, self._spatial, self)
+        self.measurement_members_changed(self._shapes, old)
+        self._shapes.changed(check_removed=True)
+
+    def measurement_validate_members(self, added, removed=()):
+        removed_ids = {shape_identity(s) for s in removed}
+        seen = set()
+        for shape in added:
+            uid = shape_identity(shape)
+            if uid in seen or (uid in self._shape_by_id and uid not in removed_ids):
+                raise ValueError('A Shape identity may occur only once in a Canvas.')
+            if any(owner is not self for owner in shape._measurement_owners):
+                raise ValueError('A live Shape cannot belong to two Canvases; copy it first.')
+            seen.add(uid)
+
+    def measurement_changed(self, shape):
+        uid = shape_identity(shape)
+        if self._shape_by_id.get(uid) is shape:
+            self._measurement_dirty.add(uid)
+
+    def measurement_members_changed(self, added, removed):
+        added = {shape_identity(s): s for s in added}
+        for shape in removed:
+            uid = shape_identity(shape)
+            if added.get(uid) is shape:
+                continue
+            shape._measurement_owners.discard(self)
+            shape._selected = False
+            for name in ('hovered_shape', '_last_hover_shape', 'scaling_shape', 'rotating_shape', 'current_shape'):
+                if getattr(self, name, None) is shape:
+                    setattr(self, name, None)
+                    if name == 'scaling_shape':
+                        self.scaling_rotated_rectangle = False
+                    elif name == 'rotating_shape':
+                        self.rotating = False
+            self._shape_by_id.pop(uid, None)
+            self._measurement_dirty.discard(uid)
+            self._measurement_removed.add(uid)
+        for uid, shape in added.items():
+            previous = self._shape_by_id.get(uid)
+            if previous is not None and previous is not shape:
+                raise ValueError('Duplicate Shape identity in one Canvas.')
+            self._shape_by_id[uid] = shape
+            shape._measurement_owners.add(self)
+            self._measurement_removed.discard(uid)
+            if previous is not shape:
+                self._measurement_dirty.add(uid)
+        if removed:
+            if hasattr(self, 'selected_shape'):
+                self.selected_shape = [s for s in self.selected_shape
+                                       if self._shape_by_id.get(shape_identity(s)) is s]
+            if getattr(self, '_edit_original', ()):
+                self._edit_original = tuple((s, points) for s, points in self._edit_original
+                                            if self._shape_by_id.get(shape_identity(s)) is s)
+
+    def _spatial_candidates(self, rect, font=None, scale=None):
+        if len(self.shapes) < 128:
+            return self.shapes
+        return self._spatial.query(self.shapes, rect,
+                                   self.scale_factor if scale is None else scale, font)
+
+    def bounded_point(self, point):
+        return QPointF(min(max(point.x(),0.),self.image_size.width()),
+                       min(max(point.y(),0.),self.image_size.height()))
+
+    def _minimum_rectangle_size(self):
+        return minimum_rectangle_size(self.image_size.width(), self.image_size.height())
+
+    def _clamp_rectangle_corner(self, anchor, moving, previous=None):
+        minimum = self._minimum_rectangle_size()
+        def coordinate(start, target, old, limit):
+            delta = target - start
+            if delta == 0:
+                direction = -1 if (old is not None and old < start) or (old is None and start >= limit) else 1
+            else:
+                direction = -1 if delta < 0 else 1
+            return start + direction * max(abs(delta), minimum)
+        return QPointF(coordinate(anchor.x(), moving.x(), previous.x() if previous else None,
+                                  self.image_size.width()),
+                       coordinate(anchor.y(), moving.y(), previous.y() if previous else None,
+                                  self.image_size.height()))
+
+    def _clamp_rotated_first_edge(self, anchor, moving):
+        dx, dy = moving.x() - anchor.x(), moving.y() - anchor.y()
+        length = np.hypot(dx, dy)
+        minimum = self._minimum_rectangle_size()
+        if length == 0:
+            return QPointF(anchor.x() + minimum, anchor.y())
+        factor = max(1.0, minimum / length)
+        return QPointF(anchor.x() + dx * factor, anchor.y() + dy * factor)
+
+    def _geometry_notice(self, message):
+        scene = self.scene()
+        views = scene.views() if scene is not None else []
+        window = views[0].window() if views else None
+        if window is not None and hasattr(window, 'statusBar'):
+            window.statusBar().showMessage(message, 4000)
+
     def add_shape(self, shape):
         """添加形状到场景中,被duplicate_shape调用"""
         """Add shapes to the scene, which is called by duplicate_shape"""
-        if shape not in self.shapes:
+        if not any(s is shape for s in self.shapes):
             self.shapes.append(shape)
             # 确保新添加的形状与画布使用相同的缩放因子
             if hasattr(shape, 'set_scale_factor'):
                 shape.set_scale_factor(self.scale_factor)
 
+            self.update(shape.visual_bounds())
             self.shapesChanged.emit()
 
     def remove_shape(self, shape):
         """从场景中安全地移除形状，清理所有引用"""
         "Remove shapes from the scene safely and clear all references."
-        if shape in self.shapes:
+        if any(s is shape for s in self.shapes):
             # 从列表中移除
             self.shapes.remove(shape)
             # 安全地从场景中移除
@@ -905,33 +900,52 @@ class Canvas(QtWidgets.QGraphicsObject):
             except Exception as e:
                 print(f"从场景移除形状时出错: {e}")
             # 清除所有可能的引用
-            if shape == self.hovered_shape:
+            if shape is self.hovered_shape:
                 self.hovered_shape = None
 
-            if shape in self.selected_shape:
-                self.selected_shape.remove(shape)
+            self.selected_shape[:] = [s for s in self.selected_shape if s is not shape]
             # 清除其他引用
-            if hasattr(self, 'scaling_shape') and self.scaling_shape == shape:
+            if hasattr(self, 'scaling_shape') and self.scaling_shape is shape:
                 self.scaling_shape = None
                 self.scaling_rotated_rectangle = False
 
-            if hasattr(self, 'rotating_shape') and self.rotating_shape == shape:
+            if hasattr(self, 'rotating_shape') and self.rotating_shape is shape:
                 self.rotating_shape = None
                 self.rotating = False
 
             # 通知界面更新
+            self.update(shape.visual_bounds())
             self.shapesChanged.emit()
 
     def boundingRect(self):
         width, height = self.image_size.width(), self.image_size.height()
-        return QtCore.QRectF(0, 0, width, height)
+        rect = QtCore.QRectF(0, 0, width, height)
+        if display.current.auto_scale:
+            # Boundary coordinates are exportable; their visible marker must also
+            # receive mouse presses after viewport pixel rounding (including Fit).
+            margin = max(12 / max(self.scale_factor, 1e-6),
+                         display.point_radius(self.scale_factor, 4) + 4 / max(self.scale_factor, 1e-6))
+            rect.adjust(-margin, -margin, margin, margin)
+        else:
+            # Reserve space for markers/strokes at the image edge, including AA.
+            margin = max(12.0, display.current.point_diameter / 2 + 2,
+                         display.current.line_width / 2 + 2) / max(self.scale_factor, 1e-6)
+            # Rotation handles can extend beyond the image by 15% + 15 image pixels.
+            # Bound that extent without scanning thousands of shapes on each query.
+            margin += max(width, height) * .15 + 15
+            rect.adjust(-margin, -margin, margin, margin)
+        return rect
 
     def set_scale_factor(self, scale):
+        if self.scale_factor == scale:
+            return
+        self.prepareGeometryChange()
         self.scale_factor = scale
         for shape in self.shapes:
             if hasattr(shape, 'set_scale_factor'):
                 shape.set_scale_factor(scale)
-
+        if self.current_shape:
+            self.current_shape.set_scale_factor(scale)
 
     def set_mode(self, mode):
         self.mode = mode
@@ -950,63 +964,102 @@ class Canvas(QtWidgets.QGraphicsObject):
 # The key method is to obtain the index of the shape or point near the mouse cursor.
 # the basis for the entire mouse event.
 #######################################################################################
-    def get_shape_at_pos(self, pos, tolerance=5):
+    def _screen_tolerance(self, pixels):
+        return pixels / max(self.scale_factor, 1e-6)
+
+    def _edit_vertex(self, shape, pos, tolerance, inside=False):
+        index = self.find_closest_vertex(pos, shape.pointslist, tolerance)
+        if index >= 0 and inside:
+            # Tiny shapes need a body target even when screen-sized handles overlap.
+            if QLineF(pos, shape.get_center()).length() < QLineF(pos, shape.pointslist[index]).length():
+                return -1
+        return index
+
+    @staticmethod
+    def _segment_distance_squared(pos, a, b):
+        dx, dy = b.x() - a.x(), b.y() - a.y()
+        length_squared = dx * dx + dy * dy
+        t = max(0., min(1., ((pos.x()-a.x())*dx + (pos.y()-a.y())*dy) / length_squared)) if length_squared else 0.
+        return (pos.x()-a.x()-t*dx)**2 + (pos.y()-a.y()-t*dy)**2
+
+    def _polygon_edge_target(self, shape, pos, tolerance=8):
+        """Return insertion index and projection for the single selected polygon."""
+        if (self.mode != 'edit' or shape.shape_type != 'polygon' or not shape.selected
+                or len(self.selected_shape) != 1 or len(shape.pointslist) < 3):
+            return None
+        # Keep the existing vertex target priority, including tiny-shape body hits.
+        if self.find_closest_vertex(pos, shape.pointslist, 8) >= 0:
+            return None
+        # Include the exact screen-pixel boundary despite transform rounding.
+        limit_squared = self._screen_tolerance(tolerance) ** 2 * (1 + 1e-12)
+        closest = None
+        min_distance = float('inf')
+        for index, end in enumerate(shape.pointslist):
+            start = shape.pointslist[index - 1]
+            dx, dy = end.x() - start.x(), end.y() - start.y()
+            length_squared = dx * dx + dy * dy
+            if length_squared == 0:
+                continue
+            t = max(0., min(1., ((pos.x()-start.x())*dx + (pos.y()-start.y())*dy) / length_squared))
+            projection = QPointF(start.x() + t*dx, start.y() + t*dy)
+            distance = (pos.x()-projection.x())**2 + (pos.y()-projection.y())**2
+            if distance <= limit_squared and distance < min_distance:
+                min_distance = distance
+                # Insert before this edge's end; index 0 splits the closing edge.
+                closest = (index, projection)
+        if closest is not None and self.find_closest_vertex(closest[1], shape.pointslist, 8) >= 0:
+            return None
+        return closest
+
+    def get_shape_at_pos(self, pos, tolerance=8, polygon_edges=False):
+        return next(self.iter_shape_hits(pos,tolerance,polygon_edges),(None,None))
+
+    def iter_shape_hits(self, pos, tolerance=8, polygon_edges=False):
         if pos is None:
-            return None, None
-        pos_x, pos_y = pos.x(), pos.y()
-        for shape in reversed(self.shapes):
-            if shape.visible:
+            return
+        margin = self._screen_tolerance(max(tolerance, 8))
+        region = QtCore.QRectF(pos.x()-margin,pos.y()-margin,2*margin,2*margin)
+        for shape in reversed(self._spatial_candidates(region)):
+            if not shape.visible:
+                continue
+            if not shape.visual_bounds(scale=None if display.current.auto_scale else self.scale_factor).adjusted(-margin, -margin, margin, margin).contains(pos):
+                continue
+            if shape.shape_type == 'point' and len(shape.pointslist) == 1:
+                radius = max(self._screen_tolerance(tolerance), display.point_radius(self.scale_factor, shape.base_point_size))
+                if QLineF(pos, shape.pointslist[0]).length() <= radius:
+                    yield shape, 'point'; continue
+            elif shape.shape_type == 'line' and len(shape.pointslist) == 2:
+                # At low zoom, endpoint targets must not cover the whole short line.
+                endpoint_pixels = min(tolerance, QLineF(*shape.pointslist).length() * self.scale_factor * .2)
+                vertex = self.find_closest_vertex(pos, shape.pointslist, endpoint_pixels)
+                midpoint = shape.get_center()
+                if vertex >= 0 and QLineF(pos, shape.pointslist[vertex]).length() < QLineF(pos, midpoint).length():
+                    yield shape, vertex; continue
+                if self._segment_distance_squared(pos, *shape.pointslist) <= self._screen_tolerance(tolerance)**2:
+                    yield shape, 'mid'; continue
+            elif shape.shape_type in ('polygon', 'rectangle', 'rotated_rectangle'):
+                inside = self.is_pos_inside_shape(shape, pos)
+                vertex = self._edit_vertex(shape, pos, tolerance, inside) if shape.selected or shape.shape_type != 'polygon' else -1
                 if shape.shape_type == 'rotated_rectangle':
-                    handle_pos = shape.get_rotation_handle_position()
-                    is_near, _ = self.is_point_near_handle(pos, handle_pos, tolerance=10)
-                    if is_near:
-                        return shape, 'rotation_handle'
+                    handle = shape.get_rotation_handle_position()
+                    near, distance = self.is_point_near_handle(pos, handle, 8)
+                    if (near and (not inside or distance < QLineF(pos, shape.get_center()).length())
+                            and (vertex < 0 or distance < QLineF(pos, shape.pointslist[vertex]).length())):
+                        yield shape, 'rotation_handle'; continue
+                if vertex >= 0:
+                    yield shape, vertex; continue
+                if polygon_edges and self._polygon_edge_target(shape, pos) is not None:
+                    yield shape, 'edge'; continue
+                if inside:
+                    yield shape, 'inside' if shape.shape_type == 'rotated_rectangle' else None; continue
+        return
 
-                    if self.is_pos_inside_shape(shape, pos):
-                        return shape, 'inside'
-
-                    closest_vertex = self.find_closest_vertex(pos, shape.pointslist, tolerance=10)
-                    if closest_vertex >= 0:
-                        return shape, closest_vertex
-
-                elif shape.shape_type == 'polygon':
-                    if shape.selected:
-                        closest_vertex = self.find_closest_vertex(pos, shape.pointslist, tolerance)
-                        if closest_vertex >= 0:
-                            return shape, closest_vertex
-
-                    if self.is_pos_inside_shape(shape, pos):
-                        return shape, None
-
-                elif shape.shape_type == 'rectangle':
-                    closest_vertex = self.find_closest_vertex(pos, shape.pointslist, tolerance)
-                    if closest_vertex >= 0:
-                        return shape, closest_vertex
-
-                    if self.is_pos_inside_shape(shape, pos):
-                        return shape, None
-
-                elif shape.shape_type == 'line' and len(shape.pointslist) == 2:
-                    midpoint = shape.get_center()
-                    is_near_mid, _ = self.is_point_near_handle(pos, midpoint, tolerance)
-                    if is_near_mid:
-                        return shape, 'mid'
-
-                    closest_vertex = self.find_closest_vertex(pos, shape.pointslist, tolerance)
-                    if closest_vertex >= 0:
-                        return shape, closest_vertex
-
-                elif shape.shape_type == 'point' and len(shape.pointslist) == 1:
-                    is_near, _ = self.is_point_near_handle(pos, shape.pointslist[0], tolerance)
-                    if is_near:
-                        return shape, 'point'
-        return None, None
-        
     def is_point_near_handle(self, pos, handle_pos, tolerance=5):
         """检查点是否接近控制点"""
         if pos is None or handle_pos is None:
             return False, float('inf')
             
+        tolerance = self._screen_tolerance(tolerance)
         dist = _calculate_distance_numba(pos.x(), pos.y(), handle_pos.x(), handle_pos.y())
         return dist <= tolerance, dist
 
@@ -1015,6 +1068,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         if not vertices:
             return -1
             
+        tolerance = self._screen_tolerance(tolerance)
         min_dist = float('inf')
         closest_idx = -1
         
@@ -1050,12 +1104,7 @@ class Canvas(QtWidgets.QGraphicsObject):
                  # 提取顶点坐标为NumPy数组，增加安全检查    
                 try:
                     # 确保 pointslist 中的元素都是有效的 QPointF 对象
-                    valid_points = [p for p in shape.pointslist if isinstance(p, QPointF)]
-                    if len(valid_points) < 3:
-                        return False
-                        
-                    vertices_x = np.array([p.x() for p in valid_points])
-                    vertices_y = np.array([p.y() for p in valid_points])
+                    vertices_x, vertices_y = shape.cached_vertices()
                     
                     # 确保数组非空且长度匹配
                     if len(vertices_x) == 0 or len(vertices_x) != len(vertices_y):
@@ -1090,6 +1139,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         if not shape.pointslist or len(shape.pointslist) < 2:
             return -1
 
+        epsilon = self._screen_tolerance(epsilon)
         min_distance = float('inf')
         closest_index = -1
         n = len(shape.pointslist)
@@ -1142,24 +1192,22 @@ class Canvas(QtWidgets.QGraphicsObject):
     def paint(self, painter, option, widget=None):
         # 设置抗锯齿
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        exposed = option.exposedRect if option is not None else self.boundingRect()
+        if exposed.isEmpty():
+            exposed = self.boundingRect()
+        full_repaint = exposed.contains(self.boundingRect())
+        font = painter.font()
+        paint_scale = None if display.current.auto_scale else display.transform_scale(painter.worldTransform())
         try:
-            # 首先绘制所被标记为 dirty 的可见形状
-            for shape in self.shapes:
-                if shape.visible and not shape._dirty:
-                    try:
-                        # 直接调用每个形状的paint方法，传递正确的参数
-                        shape.paint(painter, option, widget)
-                    except Exception as e:
-                        print(f"绘制常规形状时出错: {e}")
-                        
-            # 然后单独绘制所有被标记为 dirty 的形状
-            for shape in self.shapes:
-                if shape.visible and shape._dirty:
+            # Stable stacking order must match reverse-order hit testing.
+            candidates = self.shapes if full_repaint else self._spatial_candidates(exposed, font, paint_scale)
+            for shape in candidates:
+                if shape.visible and (full_repaint or shape.visual_bounds(font, paint_scale).intersects(exposed)):
                     try:
                         shape.paint(painter, option, widget)
-                        shape._dirty = False  # 重置 dirty 标记
                     except Exception as e:
-                        print(f"绘制脏形状时出错: {e}")
+                        print(f"Unable to paint shape: {e}")
+                shape._dirty = False
 
             # 绘制当前正在创建的形状
             if self.current_shape and self.drawing:
@@ -1183,9 +1231,10 @@ class Canvas(QtWidgets.QGraphicsObject):
         """单独绘制形状的悬停效果"""
         if not shape or not shape.visible or shape._show_points:
             return
+        scale = self.scale_factor if display.current.auto_scale else display.transform_scale(painter.worldTransform())
         pen_color = QColor(255, 255, 255, 64)
         
-        pen_width = max(int(2 / self.scale_factor), 1) 
+        pen_width = (max(int(2 / scale), 1) if display.current.auto_scale else 2/scale) 
         pen = QtGui.QPen(pen_color, pen_width, QtCore.Qt.SolidLine)
         painter.setPen(pen)
         brush_color = QtGui.QColor(pen_color)
@@ -1196,12 +1245,12 @@ class Canvas(QtWidgets.QGraphicsObject):
             rect = QtCore.QRectF(shape.pointslist[0], shape.pointslist[1])
             painter.drawRect(rect)
         elif shape.shape_type == 'polygon' and len(shape.pointslist) > 2:
-            polygon = QtGui.QPolygonF(shape.pointslist)
+            polygon = shape.cached_polygon()
             painter.drawPolygon(polygon)
         elif shape.shape_type == 'line' and len(shape.pointslist) == 2:
             painter.drawLine(shape.pointslist[0], shape.pointslist[1])
         elif shape.shape_type == 'rotated_rectangle' and len(shape.pointslist) == 4:
-            polygon = QtGui.QPolygonF(shape.pointslist)
+            polygon = shape.cached_polygon()
             painter.drawPolygon(polygon)  # 绘制旋转矩形
 
     def draw_creation_guides(self, painter):
@@ -1209,7 +1258,8 @@ class Canvas(QtWidgets.QGraphicsObject):
         if not self.current_shape or self.create_shape_type is None:
             return
         """绘制创建形状时的辅助线和预览"""
-        pen = QtGui.QPen(QtGui.QColor(255, 255, 255),  max(int(2/self.scale_factor), 1) , QtCore.Qt.DashLine)
+        scale = self.scale_factor if display.current.auto_scale else display.transform_scale(painter.worldTransform())
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255), max(int(2/scale), 1) if display.current.auto_scale else 2/scale, QtCore.Qt.DashLine)
         painter.setPen(pen)
 
         if self.create_shape_type == 'rectangle' and len(self.current_shape.pointslist) == 2:
@@ -1219,13 +1269,13 @@ class Canvas(QtWidgets.QGraphicsObject):
         elif self.create_shape_type == 'rotated_rectangle':
             if self.rotated_rect_stage == 1 and len(self.current_shape.pointslist) == 1:
                 # 第一阶段：绘制拖动线段
-                pen.setWidth(max(int(2 / self.scale_factor), 1) )
+                pen.setWidthF((max(int(2 / scale), 1) if display.current.auto_scale else 2/scale) )
                 painter.setPen(pen)
                 if self.current_mouse_pos:
                     painter.drawLine(self.current_shape.pointslist[0], self.current_mouse_pos)
                     
                     # 高亮显示第一个点
-                    point_size = max(int(6/self.scale_factor), 2)  # 确保是整数
+                    point_size = (max(int(6/scale), 2) if display.current.auto_scale else 6/scale)  # 确保是整数
                     painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255)))
                     painter.drawEllipse(self.current_shape.pointslist[0], point_size, point_size)
             
@@ -1234,12 +1284,12 @@ class Canvas(QtWidgets.QGraphicsObject):
                 polygon = QtGui.QPolygonF(self.current_shape.pointslist)
                 
                 # 使用更明显的样式绘制预览
-                pen = QtGui.QPen(QtGui.QColor(255, 255, 255), max(int(2/self.scale_factor), 1), QtCore.Qt.DashLine)
+                pen = QtGui.QPen(QtGui.QColor(255, 255, 255), (max(int(2/scale), 1) if display.current.auto_scale else 2/scale), QtCore.Qt.DashLine)
                 painter.setPen(pen)
                 painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 60)))
                 painter.drawPolygon(polygon)
                 # 绘制四个角
-                point_size = max(int(6/self.scale_factor), 2)  # 确保是整数
+                point_size = (max(int(6/scale), 2) if display.current.auto_scale else 6/scale)  # 确保是整数
                 painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 0, 0, 60)))
                 for point in self.current_shape.pointslist:
                     painter.drawEllipse(point, point_size, point_size)
@@ -1258,7 +1308,7 @@ class Canvas(QtWidgets.QGraphicsObject):
                         painter.drawLine(points[-1], self.current_mouse_pos)
                 
                 # 绘制所有点
-                point_size = 4/self.scale_factor  # 更大的点尺寸
+                point_size = 4/scale  # 更大的点尺寸
                 painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 180)))
                 for point in points:
                     painter.drawEllipse(point, point_size, point_size)
@@ -1268,26 +1318,26 @@ class Canvas(QtWidgets.QGraphicsObject):
                 painter.drawLine(self.current_shape.pointslist[0], self.current_mouse_pos)
 
     def set_selected_shapes(self, shapes):
-        # 找出状态将要发生变化的形状
-        shapes_to_update = []
-
-        # 标记将被取消选择的形状
-        for s in self.shapes:
-            was_selected = s.selected
-            is_selected = s in shapes
-
-            if was_selected != is_selected:
-                s._dirty = True
-                shapes_to_update.append(s)
-                s.selected = is_selected
-
+        # Canvas owns the selection; equal geometry is not object identity.
+        existing = {id(shape) for shape in self.shapes}
+        shapes = list({id(shape): shape for shape in shapes if id(shape) in existing}.values())
+        chosen = {id(shape) for shape in shapes}
+        previous = {id(shape) for shape in self.selected_shape}
+        region = QtCore.QRectF()
+        changed = False
+        for shape in self.shapes:
+            selected = id(shape) in chosen
+            if shape.selected != selected:
+                region = region.united(shape.visual_bounds(
+                    scale=None if display.current.auto_scale else self.scale_factor))
+                shape.selected = selected
+                shape._dirty = True
+                changed = True
         self.selected_shape = shapes
-        self.shapeSelected.emit(shapes)
-
-        # 如果有形状状态变化，更新相关区域
-        if shapes_to_update:
-            for s in shapes_to_update:
-                s.update_shape()
+        if changed or previous != chosen:
+            self.shapeSelected.emit(shapes)
+        if changed:
+            self.update(region)
 
 ######################################################################
 # 关于形状创建的一系列方法
@@ -1336,6 +1386,39 @@ class Canvas(QtWidgets.QGraphicsObject):
     def finish_shape(self):
         """完成形状创建"""
         if self.current_shape:
+            shape = self.current_shape
+            width, height = self.image_size.width(), self.image_size.height()
+            if shape.shape_type == 'polygon':
+                points = shape.pointslist
+                while len(points) > 1 and (points[-1] == points[0] or points[-1] == points[-2]):
+                    points.pop()
+                if len(points) < MIN_POLYGON_VERTICES or len({(p.x(), p.y()) for p in points}) < MIN_POLYGON_VERTICES:
+                    self._geometry_notice('A polygon requires at least 5 points.')
+                    return False
+                from annotation_io import validate_polygon_export
+                content = '0 ' + ' '.join(f'{p.x()/width:.6f} {p.y()/height:.6f}' for p in points)
+                try:
+                    validate_polygon_export(content, width, height, 'new polygon')
+                except ValueError as error:
+                    self._geometry_notice(str(error))
+                    return False
+            elif shape.shape_type in ('rectangle', 'rotated_rectangle'):
+                from annotation_io import validate_rectangle_export
+                if shape.shape_type == 'rectangle':
+                    p1, p2 = shape.pointslist
+                    line = (f'0 {(p1.x()+p2.x())/(2*width):.6f} '
+                            f'{(p1.y()+p2.y())/(2*height):.6f} '
+                            f'{abs(p2.x()-p1.x())/width:.6f} '
+                            f'{abs(p2.y()-p1.y())/height:.6f}')
+                else:
+                    line = '0 ' + ' '.join(f'{p.x()/width:.17g} {p.y()/height:.17g}'
+                                         for p in shape.pointslist)
+                try:
+                    validate_rectangle_export([shape], line, shape.shape_type,
+                                              width, height, 'new rectangle')
+                except (ValueError, IndexError) as error:
+                    self._geometry_notice(str(error))
+                    return False
             self.save_state()
             self.shapes.append(self.current_shape)
             self.shapeCreated.emit(self.current_shape)
@@ -1343,8 +1426,10 @@ class Canvas(QtWidgets.QGraphicsObject):
             self.current_shape = None
             self.drawing = False
             self.create_shape_type = self.create_shape_type
-            # self.shapesChanged.emit()
+            self.shapesChanged.emit()
             self.update()
+            return True
+        return False
 
 ###############################################
 ############ 撤销回退机制的实现
@@ -1494,146 +1579,234 @@ class Canvas(QtWidgets.QGraphicsObject):
 ############ 新撤销回退机制的实现-260307
 ############ the revocation/undo mechanism
 ###############################################
-    def save_state(self):
-            """保存当前形状状态以支持撤销操作，仅提取坐标和属性存入字典以节省内存"""
-            try:
-                # 创建形状的轻量级数据字典表示
-                shapes_state = []
-                for shape in self.shapes:
-                    try:
-                        # 提取为原生元组 (x, y) 而非 QPointF 对象，极大地减少内存开销
-                        valid_points = []
-                        for p in shape.pointslist:
-                            if p is not None and isinstance(p, QPointF):
-                                valid_points.append((p.x(), p.y()))
+    @property
+    def undo_stack(self):
+        return self._history.undo
 
-                        # 检查形状是否有效
-                        if not valid_points:
-                            continue
+    @undo_stack.setter
+    def undo_stack(self, value):
+        self._history.undo = value
 
-                        # 确保多边形至少有3个点，或者其他形状符合要求
-                        if (shape.shape_type == 'polygon' and len(valid_points) < 3) or \
-                                (shape.shape_type == 'rectangle' and len(valid_points) != 2) or \
-                                (shape.shape_type == 'line' and len(valid_points) != 2) or \
-                                (shape.shape_type == 'rotated_rectangle' and len(valid_points) != 4) or \
-                                (shape.shape_type == 'point' and len(valid_points) != 1):
-                            continue
+    @property
+    def redo_stack(self):
+        return self._history.redo
 
-                        # 核心优化：将所需数据保存为纯字典，放弃实例化 Shape
-                        state_dict = {
-                            'label': shape.label,
-                            'classnum': shape.classnum,
-                            'pointslist': valid_points,
-                            'shape_type': shape.shape_type,
-                            'group_id': shape.group_id,
-                            'visible': shape.visible,
-                            '_selected': shape._selected,
-                            'rotated_angle': shape.rotated_angle,
-                            '_show_group_id': shape._show_group_id,
-                            'feature_results': shape.feature_results,
-                            'scale_factor': shape.scale_factor
-                        }
-                        shapes_state.append(state_dict)
-                    except Exception as e:
-                        print(f"处理形状状态时出错: {e}")
-                        continue  # 跳过这个形状
+    def save_state(self, commit=True):
+        if commit and self._edit_before is not None:
+            self._finish_geometry_edit()
+        state = self._history.capture(self.shapes)
+        if commit:
+            self._push_undo_state(state, clear_redo=False)
+            self._history_pending = state
+        return state
 
-                # 存储状态
-                self.undo_stack.append(shapes_state)
+    def _push_undo_state(self, state, clear_redo=True):
+        if not self.undo_stack or self.undo_stack[-1] != state:
+            self.undo_stack.append(state)
+        if clear_redo:
+            self.redo_stack.clear()
+            self._history.trim()
 
-                # [DEBUG 验证打印] - 用于在终端确认优化已生效
-                print(f"[DEBUG - 优化验证] save_state 已调用。成功将 {len(shapes_state)} 个形状以轻量字典形式存入撤销堆栈。当前堆栈深度: {len(self.undo_stack)}")
+    def _commit_pending_history(self):
+        if self._restoring_history or self._history_pending is None:
+            return
+        pending = self._history_pending
+        self._history_pending = None
+        # A changed object count already proves a real edit (add/delete). Avoid
+        # copying the remaining scene just to establish that it is not a no-op.
+        # The normal shapesChanged handlers still validate measurements in full.
+        changed = len(self.shapes) != len(pending)
+        if changed or not self._history.same_content(self._history.capture(self.shapes), pending):
+            self.redo_stack.clear()
+        elif self.undo_stack and self.undo_stack[-1] is pending:
+            self.undo_stack.pop()
+        self._history.trim()
 
-                # 限制撤销栈大小
-                if len(self.undo_stack) > 4:
-                    self.undo_stack.pop(0)
+    @staticmethod
+    def _coordinates(shape):
+        return tuple((p.x(), p.y()) for p in shape.pointslist)
 
-            except Exception as e:
-                print(f"保存状态时出错: {e}")
-                self.undo_stack = []
+    def _prepare_geometry_edit(self, event):
+        if not event.buttons() & QtCore.Qt.LeftButton:
+            return False
+        if not (self.moving_shape or self.dragging_point or self.rotating or self.scaling_rotated_rectangle):
+            return False
+        if not self.selected_shape:
+            return False
+        if self._edit_before is None:
+            # Ignore click jitter, in screen pixels. Do not evict history until commit.
+            if QLineF(self.drag_start_pos, event.pos()).length() * self.scale_factor < 3:
+                return False
+            self._edit_before = self.save_state(commit=False)
+            if self._edit_before is None:
+                return False
+            self._edit_original = tuple((s, self._coordinates(s)) for s in self.selected_shape)
+            self._move_applied = QPointF()
+        return True
+
+    def _finish_geometry_edit(self):
+        had_preview = self._edit_before is not None
+        if had_preview:
+            changed = any(len(s.pointslist) != len(before) or any(
+                abs(p.x() - x) > 1e-9 or abs(p.y() - y) > 1e-9
+                for p, (x, y) in zip(s.pointslist, before))
+                for s, before in self._edit_original)
+            if changed:
+                self._push_undo_state(self._edit_before)
+            else:
+                # A round trip can leave floating-point noise; restore exact input.
+                for s, before in self._edit_original:
+                    if self._coordinates(s) != before:
+                        s.pointslist = [QtCore.QPointF(x, y) for x, y in before]
+        self._edit_before = None
+        self._edit_original = ()
+        self._reset_edit_motion()
+        return had_preview
+
+    def _reset_edit_motion(self):
+        self.moving_shape = self.dragging_point = self.rotating = self.scaling_rotated_rectangle = False
+        self.rotating_shape = self.scaling_shape = None
+        self.hovered_point_index = None
+        self.setCursor(QtCore.Qt.ArrowCursor)
+
+    def _select_edit_target(self, event, shape, preserve_group=False):
+        if event.modifiers() & QtCore.Qt.ControlModifier:
+            selected = list(self.selected_shape)
+            if any(s is shape for s in selected):
+                selected = [s for s in selected if s is not shape]
+            else:
+                selected.append(shape)
+            self.set_selected_shapes(selected)
+            self.update()
+            return False  # Ctrl changes selection; never starts a geometry edit.
+        if preserve_group and any(s is shape for s in self.selected_shape):
+            self.set_selected_shapes(self.selected_shape)
+        else:
+            self.set_selected_shapes([shape])
+        self.drag_start_pos = event.pos()
+        return True
 
     def undo(self):
-            """安全地恢复到上一个保存的状态"""
-            if not self.undo_stack:
-                return
+        return self._restore_history(self.undo_stack, self.redo_stack)
 
-            try:
-                # 恢复上一个状态
-                previous_shapes = self.undo_stack.pop()
-                scene = self.scene()
+    def redo(self):
+        return self._restore_history(self.redo_stack, self.undo_stack)
 
-                if not scene:
-                    print("警告：当前画布没有关联场景")
-                    return
+    def _restore_history(self, source, destination):
+        self._finish_geometry_edit()
+        self._commit_pending_history()
+        if not source:
+            return False
+        current = self._history.capture(self.shapes)
+        previous = source[-1]
+        # Prepare every object that can allocate or deep-copy before touching the
+        # live scene or either history stack.
+        existing = {getattr(shape, '_history_id', None): shape for shape in self.shapes}
+        prepared = []
+        for state in previous:
+            points = [QPointF(x, y) for x, y in state['pointslist']]
+            payloads = {key: copy.deepcopy(state[key]) for key in
+                        ('feature_results', '_measurement_scale', 'polygon_audit')}
+            shape = existing.get(state['_history_id'])
+            if shape is None:
+                shape = Shape(label=state['label'], classnum=state['classnum'],
+                              pointslist=points, shape_type=state['shape_type'],
+                              group_id=state['group_id'])
+                shape._history_id = state['_history_id']
+            prepared.append((state, points, payloads, shape))
+        original_shapes = list(self.shapes)
+        original_ids = {id(shape) for shape in original_shapes}
+        shape_backups = [(shape, shape.__dict__.copy()) for shape in original_shapes]
+        canvas_backup = self.__dict__.copy()
+        for key in ('_shape_by_id', '_measurement_dirty', '_measurement_removed'):
+            canvas_backup[key] = getattr(self, key).copy()
+        source_backup, destination_backup = list(source), list(destination)
+        restored = []
+        self._restoring_history = True
+        self._history_generation += 1
+        try:
+            for state, points, payloads, shape in prepared:
+                measurement_payload_changed = (shape.feature_results != state['feature_results']
+                    or getattr(shape, '_measurement_key', None) != state['_measurement_key']
+                    or getattr(shape, 'measurement_error', None) != state['measurement_error'])
+                if id(shape) in original_ids and (self._coordinates(shape) != state['pointslist']
+                                                  or shape.shape_type != state['shape_type']):
+                    shape.shape_type = state['shape_type']
+                    shape.pointslist = points
+                for key in ('label','classnum','group_id','visible','rotated_angle',
+                            '_show_group_id','unit','_show_points'):
+                    if getattr(shape,key) != state[key]:
+                        setattr(shape,key,state[key])
+                for key in ('feature_results','_measurement_scale','polygon_audit'):
+                    if getattr(shape,key,None) != state[key]:
+                        setattr(shape,key,payloads[key])
+                # Keep the saved provenance, not a fabricated fresh stamp. The normal
+                # commit refresh and exports still compare it against geometry/scale.
+                shape._measurement_key = state['_measurement_key']
+                shape.measurement_error = state['measurement_error']
+                if measurement_payload_changed:
+                    self.measurement_changed(shape)
+                shape.selected = False
+                shape._history_epoch = self._history_generation
+                shape.set_scale_factor(self.scale_factor)
+                restored.append(shape)
+            if len(self.shapes) != len(restored) or any(a is not b for a,b in zip(self.shapes,restored)):
+                self.shapes[:] = restored
+            self.selected_shape = []
+            self.hovered_shape = self._last_hover_shape = None
+            self._reset_edit_motion()
+            self.set_mode('edit')
+            self.drawing = False
+            self.current_shape = None
+            self.rotated_rect_stage = 0
+            destination.append(current)
+            source.pop()
+            self._history.trim()
+            self.shapeSelected.emit([])
+            self.shapesChanged.emit()
+            self.update()
+        except Exception:
+            source[:] = source_backup
+            destination[:] = destination_backup
+            for shape, backup in shape_backups:
+                shape.__dict__.clear()
+                shape.__dict__.update(backup)
+            self.shapes[:] = original_shapes
+            self.__dict__.clear()
+            self.__dict__.update(canvas_backup)
+            self._spatial.members_dirty = True
+            raise
+        finally:
+            self._restoring_history = False
+        return True
 
-                # 清除当前状态
-                self.selected_shape = []
-                self.hovered_shape = None
+    def _polygon_add_cursor(self):
+        """A fixed screen-size arrow-plus, distinct from vertex-edit crosshairs."""
+        if not hasattr(self, '_add_vertex_cursor'):
+            screen = QtGui.QGuiApplication.primaryScreen()
+            ratio = screen.devicePixelRatio() if screen is not None else 1.
+            pixmap = QtGui.QPixmap(round(32 * ratio), round(32 * ratio))
+            pixmap.setDevicePixelRatio(ratio)
+            pixmap.fill(QtCore.Qt.transparent)
+            painter = QtGui.QPainter(pixmap)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            arrow = QtGui.QPainterPath(QPointF(3, 2))
+            for point in ((3, 20), (8, 15), (12, 23), (16, 21), (12, 13), (20, 13)):
+                arrow.lineTo(QPointF(*point))
+            arrow.closeSubpath()
+            painter.setPen(QtGui.QPen(QtCore.Qt.white, 2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+            painter.setBrush(QtCore.Qt.black)
+            painter.drawPath(arrow)
+            segments = ((24, 19, 24, 29), (19, 24, 29, 24))
+            # A white outline keeps the black cursor legible over any image.
+            for color, width in ((QtCore.Qt.white, 3.5), (QtCore.Qt.black, 1.5)):
+                painter.setPen(QtGui.QPen(color, width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+                for segment in segments:
+                    painter.drawLine(QtCore.QLineF(*segment))
+            painter.end()
+            self._add_vertex_cursor = QtGui.QCursor(pixmap, 3, 2)
+        return self._add_vertex_cursor
 
-                # 清除场景中的所有形状
-                for shape in self.shapes.copy():
-                    try:
-                        if shape.scene() == scene:
-                            scene.removeItem(shape)
-                        self.shapes.remove(shape)
-                    except Exception as e:
-                        print(f"从场景移除形状时出错: {e}")
-                
-                # 确保形状列表为空
-                self.shapes.clear()
-                
-                # 核心优化：为每个保存的轻量级字典重新实例化 Shape 对象
-                for state_dict in previous_shapes:
-                    try:
-                        new_shape = Shape(
-                            label=state_dict['label'],
-                            classnum=state_dict['classnum'],
-                            # 将元组还原为 QPointF
-                            pointslist=[QPointF(x, y) for x, y in state_dict['pointslist']],
-                            shape_type=state_dict['shape_type'],
-                            group_id=state_dict['group_id']
-                        )
-                        
-                        # 复制其他属性
-                        new_shape.visible = state_dict['visible']
-                        new_shape._selected = state_dict['_selected']
-                        new_shape.rotated_angle = state_dict['rotated_angle']
-                        new_shape._show_group_id = state_dict['_show_group_id']
-                        new_shape.feature_results = state_dict.get('feature_results', {})
-                        new_shape.scale_factor = state_dict.get('scale_factor', 1.0)
-                        
-                        # 只添加到列表和场景，不设置父项
-                        self.shapes.append(new_shape)
-                    except Exception as e:
-                        print(f"恢复形状时出错: {e}")
-                        continue
-                        
-                # [DEBUG 验证打印] - 用于在终端确认优化已生效
-                print(f"[DEBUG - 优化验证] undo 已调用。成功从字典数据恢复了 {len(previous_shapes)} 个形状。")
-                # 【新增：强制阻断所有残留的绘制/交互过程】
-                self.set_mode('edit')  # 强制切回编辑模式
-                self.drawing = False
-                self.current_shape = None
-                self.rotated_rect_stage = 0
-                self.shapeSelected.emit([]) # 确保侧边栏清空高亮
-                # -----------------------------------------------
-                # 重置交互状态
-                self.dragging_point = False
-                self.moving_shape = False
-                self.rotating = False
-                self.scaling_rotated_rectangle = False
-                
-                # 更新界面
-                self.shapesChanged.emit()
-                self.update()
-                            
-            except Exception as e:
-                print(f"撤销操作出错: {e}")
-                self.undo_stack = []
-                self.update()
-###############################################
-############ 关于鼠标事件代码==========Hover
-###############################################
     def hoverMoveEvent(self, event):
 
         pos = event.pos()  # 获取鼠标当前位置。
@@ -1658,99 +1831,25 @@ class Canvas(QtWidgets.QGraphicsObject):
             super(Canvas, self).hoverMoveEvent(event)
             return
         
-        elif self.mode =='edit':
-            pos = event.pos()  # 获取鼠标当前位置。
-            cursor = QtCore.Qt.ArrowCursor  # 初始化光标为箭头光标。
-            hovered = False  # 初始化悬停状态为 False
-            self.hovered_shape = None  # 初始化悬停的形状为 None
-            self.hovered_point_index = None  # 初始化悬停的点索引为 None
-
-            # 首先重置所有形状的悬停点索引
-            for s in self.shapes:
-                s.hovered_point_index = None
-
-            # 检查是否有选中的形状
-            has_selected_shapes = len(self.selected_shape) > 0
-
-            try:
-                # 如果有选中的形状，只检查这些形状
-                if has_selected_shapes:
-                    shape, index = None, None
-                    # 只检查选中的形状
-                    for selected in self.selected_shape:
-                        if not selected.visible:
-                            continue
-
-                        # 使用自定义方法检查点或区域是否在这个选中形状上
-                        if selected.shape_type == 'rotated_rectangle':
-                            handle_pos = selected.get_rotation_handle_position()
-                            is_near, _ = self.is_point_near_handle(pos, handle_pos, 8)
-                            if is_near:
-                                shape, index = selected, 'rotation_handle'
-                                break
-
-                        closest_vertex = self.find_closest_vertex(pos, selected.pointslist, 5)
-                        if closest_vertex >= 0:
-                            shape, index = selected, closest_vertex
-                            break
-
-                        if self.is_pos_inside_shape(selected, pos):
-                            shape, index = selected, 'inside'
-                            break
-                else:
-                    # 如果没有选中形状，则检查所有形状
-                    shape, index = self.get_shape_at_pos(pos)
-            except Exception as e:
-                print(f"Error in get_shape_at_pos: {e}")
-                shape, index = None, None
-
-            # 处理找到的形状
-            if shape and shape.visible:
-                if shape.shape_type == 'rotated_rectangle' and shape.visible:
-                    self.hoverMoveEvent_rotated_rectangle(event)
-
-                elif shape.shape_type in ["polygon", "rectangle"] and shape.visible:
-                    if index is not None:
-                        # 处理点悬停
-                        self.hovered_shape = shape
-                        self.hovered_point_index = index
-                        shape.hovered_point_index = index
-                        cursor = QtCore.Qt.CrossCursor
-                        shape.update_shape()
-                        hovered = True
-                    else:
-                        if self.is_pos_inside_shape(shape, pos):
-                            self.hovered_shape = shape
-                            self.hovered_point_index = None
-                            shape.hovered_point_index = None
-                            shape.update_shape()
-                            hovered = True
-
-                elif shape.shape_type == "line":
-                    if index != "mid":
-                        self.hovered_point_index = index
-                        shape.hovered_point_index = index
-                        shape.update_shape()
-                        hovered = True
-                    else:
-                        pass
-
-                elif shape.shape_type == "point":
-                    if index == "point":
-                        self.hovered_shape = shape
-                        cursor = QtCore.Qt.CrossCursor
-                        shape.update_shape()
-                        hovered = True
-
-            self.setCursor(QtGui.QCursor(cursor))
-            self.update()# 必须得不能注释
-            super(Canvas, self).hoverMoveEvent(event)
-            return
-        
-
-        else:
-            super(Canvas, self).hoverMoveEvent(event)
-            return    
+        elif self.mode == 'edit':
+            old = getattr(self, '_last_hover_shape', None)
+            region = old.visual_bounds() if old is not None else QtCore.QRectF()
+            if old is not None:
+                old.hovered_point_index = None
+            polygon_edges = not (event.modifiers() & QtCore.Qt.ControlModifier) and event.modifiers() != QtCore.Qt.AltModifier
+            shape, part = self.get_shape_at_pos(pos, polygon_edges=polygon_edges)
+            self.hovered_shape = self._last_hover_shape = shape
+            self.hovered_point_index = part if isinstance(part, int) else None
+            if shape is not None:
+                shape.hovered_point_index = self.hovered_point_index
+                region = region.united(shape.visual_bounds())
+            cursor = (QtGui.QCursor(QtCore.Qt.CrossCursor) if isinstance(part, int) else
+                      self._polygon_add_cursor() if part == 'edge' else
+                      QtGui.QCursor(QtCore.Qt.OpenHandCursor if shape is not None else QtCore.Qt.ArrowCursor))
+            self.setCursor(cursor)
+            if not region.isEmpty():
+                self.update(region)
+        super(Canvas, self).hoverMoveEvent(event)
 
     def hoverMoveEvent_rotated_rectangle(self, event):
         pos = event.pos()
@@ -1761,7 +1860,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         shape, index = self.get_shape_at_pos(pos) # 获取鼠标位置附近的形状和点索引    
         if shape is None:
             return
-        if shape.visible and index:
+        if shape.visible and index is not None:
             hovered = True
             self.hovered_shape = shape
             shape.hovered_point_index = None
@@ -1769,7 +1868,7 @@ class Canvas(QtWidgets.QGraphicsObject):
             if index not in ['rotation_handle', 'inside']:
                 self.hovered_point_index = index
                 shape.hovered_point_index = index
-        self.update()# 必须得不能注释
+        # The caller updates the union of the previous and current hover bounds.
 
 ###############################################
 ############ 关于鼠标事件代码===========Press
@@ -1789,7 +1888,7 @@ class Canvas(QtWidgets.QGraphicsObject):
         ab_vector = QtCore.QPointF(point_b.x() - point_a.x(), point_b.y() - point_a.y())
         ab_length = np.sqrt(ab_vector.x() ** 2 + ab_vector.y() ** 2)
         
-        if ab_length < 1e-6:  # 防止除零错误
+        if ab_length < 1e-12:  # 防止除零错误
             return None, None
             
         # 计算AB的单位方向向量
@@ -1803,6 +1902,9 @@ class Canvas(QtWidgets.QGraphicsObject):
         
         # 计算点M到线AB的垂直距离（带符号）
         height = am_vector.x() * perp_unit_ab.x() + am_vector.y() * perp_unit_ab.y()
+        minimum = self._minimum_rectangle_size()
+        if abs(height) < minimum:
+            height = -minimum if height < 0 else minimum
         
         # 计算矩形的另外两个点 (保证是矩形，不是平行四边形)
         point_d = QtCore.QPointF(
@@ -1826,21 +1928,30 @@ class Canvas(QtWidgets.QGraphicsObject):
             self.handle_createmode_mouse_press(event)
         else:
             pos = event.pos()
-            clicked_shape, clicked_part = self.get_shape_at_pos(pos, tolerance=8)
+            if event.button() == QtCore.Qt.LeftButton and event.modifiers() == QtCore.Qt.AltModifier:
+                candidates = [shape for shape, part in self.iter_shape_hits(pos)]
+                if candidates:
+                    current = self.selected_shape[0] if len(self.selected_shape) == 1 else None
+                    index = next((i for i,shape in enumerate(candidates) if shape is current), -1)
+                    self.set_selected_shapes([candidates[(index+1) % len(candidates)]])
+                event.accept()
+                return
+            polygon_edges = (self.mode == 'edit' and event.button() == QtCore.Qt.LeftButton
+                             and not (event.modifiers() & QtCore.Qt.ControlModifier))
+            clicked_shape, clicked_part = self.get_shape_at_pos(pos, tolerance=8, polygon_edges=polygon_edges)
 
             if clicked_shape and clicked_shape.shape_type == 'rotated_rectangle':
                 self.handle_editmode_mouse_press_rotated_rectangle(event, clicked_shape, clicked_part)
             elif clicked_shape and clicked_shape.shape_type == 'line':
                 self.handle_editmode_mouse_press_line(event, clicked_shape, clicked_part)
-            elif clicked_shape and clicked_shape.shape_type == 'point'and clicked_part == 'point':
-                self.moving_shape = True
-                self.drag_start_pos = pos
-                clicked_shape.selected = True
-                self.set_selected_shapes([clicked_shape])
-            
+            elif clicked_shape and clicked_shape.shape_type == 'point' and clicked_part == 'point':
+                if event.button() == QtCore.Qt.LeftButton and self._select_edit_target(event, clicked_shape, preserve_group=True):
+                    self.moving_shape = True
+                event.accept()
+
             else:
 
-                self.handle_editmode_mouse_press(event)
+                self.handle_editmode_mouse_press(event, (clicked_shape, clicked_part))
         super(Canvas, self).mousePressEvent(event)
 
 
@@ -1867,6 +1978,8 @@ class Canvas(QtWidgets.QGraphicsObject):
                    
                     # 计算旋转矩形的四个点
                     p3, p4 = self.calculate_rotated_rectangle(p1, p2, pos)
+                    while len(self.current_shape.pointslist) < 4:
+                        self.current_shape.pointslist.append(None)
                     self.current_shape.pointslist[2] = p3
                     self.current_shape.pointslist[3] = p4
       
@@ -1874,7 +1987,7 @@ class Canvas(QtWidgets.QGraphicsObject):
                     # 计算旋转角度
                     edge_vector = QtCore.QLineF(p1, p2)
                     angle = edge_vector.angle()
-                    self.current_shape.rotated_angle = angle
+                    self.current_shape.sync_rotated_angle()
                     
                     # 完成形状创建
                     self.finish_shape()
@@ -1891,6 +2004,8 @@ class Canvas(QtWidgets.QGraphicsObject):
                 self.update()
 
         elif self.create_shape_type == 'point':
+            if pos != self.bounded_point(pos):
+                return
             if event.button() == QtCore.Qt.LeftButton:
 
                 self.drawing = True
@@ -1916,255 +2031,85 @@ class Canvas(QtWidgets.QGraphicsObject):
 
 
                 else:
-                    self.current_shape.pointslist.append(pos)
-                    self.update()  # 刷新画布以显示新线
-                    
-                    # 检查是否与第一个点闭合
-                    if len(self.current_shape.pointslist) >= 3:
-                        first_point = self.current_shape.pointslist[0]
-                        # 判断是否与第一个点足够接近以闭合
-                        if self.is_close_enough(pos, first_point, tolerance=8):
-                            self.finish_shape()
+                    first_point = self.current_shape.pointslist[0]
+                    if self.is_close_enough(pos, first_point, tolerance=8):
+                        self.finish_shape()
+                    else:
+                        self.current_shape.pointslist.append(pos)
+                        self.update()  # 刷新画布以显示新线
 
     def handle_editmode_mouse_press_rotated_rectangle(self, event, clicked_shape, clicked_part):
-        pos = event.pos()
-        
-        if event.button() == QtCore.Qt.LeftButton:
-            if clicked_part not in ['rotation_handle', 'inside']  and clicked_shape is not None:
-                clicked_shape.selected = True
-                self.selected_shape = [clicked_shape]
-                self.hovered_point_index = clicked_part
-                self.shapeSelected.emit([clicked_shape])
-                
-
-                self.scaling_rotated_rectangle = True
-                self.scaling_shape = clicked_shape
-                self.hovered_point_index = clicked_part
-                
-                self.scaling_anchor_index = clicked_part
-                self.scaling_fixed_index = (clicked_part + 2) % 4  # 对角点索引
-                self.scaling_fixed_point = clicked_shape.pointslist[self.scaling_fixed_index]
-
-                self.previous_mouse_pos = pos  # 记录鼠标起始位置
-                self.initial_point = clicked_shape.pointslist[clicked_part]  # 记录被拖动顶点的初始位置
-                # self.update_rotation_handle(clicked_shape)
-                clicked_shape.get_rotation_handle_position()
-
-                # 可在此处添加逻辑，例如更新显示连接线等
-            elif clicked_part == 'rotation_handle':
-                # 开始旋转
-                self.rotation_start_pos = pos
-                clicked_shape.selected = True
-                self.hovered_shape = clicked_shape
-                self.selected_shape = [clicked_shape]
-                self.shapeSelected.emit([clicked_shape])
-                self.rotating = True
-                self.rotating_shape = clicked_shape
-                self.rotation_center = clicked_shape.get_center()
-
-                       
-            elif clicked_part == 'inside':
-                modifiers = event.modifiers()
-                ctrl_pressed = modifiers & QtCore.Qt.ControlModifier
-                if ctrl_pressed:
-                    if clicked_shape in self.selected_shape:
-                        # 如果形状已被选中，取消选中
-                        self.selected_shape.remove(clicked_shape)
-                        clicked_shape.selected = False
-                    else:
-                        # 添加形状到选中列表
-                        self.selected_shape.append(clicked_shape)
-                        clicked_shape.selected = True
-                    
-                    self.set_selected_shapes(self.selected_shape)
-                    self.shapeSelected.emit(self.selected_shape)
-                else:
-                    # 如果未按下 Ctrl 键，清除其他选择，只选择当前形状
-                    for s in self.shapes:
-                        s.selected = False
-                    self.selected_shape = [clicked_shape]
-                    clicked_shape.selected = True
-                    self.shapeSelected.emit(self.selected_shape)
-                
-                self.moving_shape = True
-                self.drag_start_pos = pos
-                self.save_state()
-                self.shapesChanged.emit()
-                self.setCursor(QtCore.Qt.ClosedHandCursor)
-                    
-        self.update()
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        if not self._select_edit_target(event, clicked_shape, preserve_group=clicked_part == 'inside'):
+            return
+        if isinstance(clicked_part, int):
+            self.scaling_rotated_rectangle = True
+            self.scaling_shape = clicked_shape
+            self.hovered_point_index = clicked_part
+            self.scaling_anchor_index = clicked_part
+            self.scaling_fixed_index = (clicked_part + 2) % 4
+            self.scaling_fixed_point = QtCore.QPointF(clicked_shape.pointslist[self.scaling_fixed_index])
+        elif clicked_part == 'rotation_handle':
+            self.rotation_start_pos = event.pos()
+            self.hovered_shape = clicked_shape
+            self.rotating = True
+            self.rotating_shape = clicked_shape
+            self.rotation_center = clicked_shape.get_center()
+        elif clicked_part == 'inside':
+            self.moving_shape = True
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
 
     def handle_editmode_mouse_press_line(self, event, clicked_shape, clicked_part):
-        pos=event.pos()
-        if event.button() == QtCore.Qt.LeftButton:
-            if clicked_shape:
-                if isinstance(clicked_part, int):
-                    self.selected_shape = [clicked_shape]
-                    self.hovered_point_index = clicked_part
-                    print(f"##############Clicked on point {clicked_part} of shape {clicked_shape}########")
-                    clicked_shape.selected = True
-                    
-                    self.shapeSelected.emit([clicked_shape])
-                    self.setCursor(QtCore.Qt.CrossCursor)
-                    self.dragging_point = True
-                    self.drag_start_pos = pos
-                    self.save_state()
-                    self.shapesChanged.emit()
-                    self.update()
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        if not self._select_edit_target(event, clicked_shape, preserve_group=clicked_part == 'mid'):
+            return
+        if isinstance(clicked_part, int):
+            self.hovered_point_index = clicked_part
+            self.dragging_point = True
+            self.setCursor(QtCore.Qt.CrossCursor)
+        elif clicked_part == 'mid':
+            self.moving_shape = True
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
 
-
-                elif clicked_part == 'mid':
-                    modifiers = event.modifiers()
-                    ctrl_pressed = modifiers & QtCore.Qt.ControlModifier
-                    if ctrl_pressed:
-                        if clicked_shape in self.selected_shape:
-                            # 如果形状已被选中，取消选中
-                            self.selected_shape.remove(clicked_shape)
-                            clicked_shape.selected = False
-                        else:
-                            # 添加形状到选中列表
-                            self.selected_shape.append(clicked_shape)
-                            clicked_shape.selected = True
-                        self.set_selected_shapes(self.selected_shape)
-                        self.shapeSelected.emit(self.selected_shape)
-                    else:
-                        # 如果未按下 Ctrl 键，清除其他选择，只选择当前形状
-                        for s in self.shapes:
-                            s.selected = False
-                        self.selected_shape = [clicked_shape]
-                        clicked_shape.selected = True
-                        self.shapeSelected.emit(self.selected_shape)
-
-
-                    self.moving_shape = True
-                    self.drag_start_pos = pos
-                    self.save_state()
-                    self.shapesChanged.emit()
-                    self.setCursor(QtCore.Qt.ClosedHandCursor)
-        self.update()
-     
-    def handle_editmode_mouse_press(self, event):
+    def handle_editmode_mouse_press(self, event, hit=None):
         pos = event.pos()
-        clicked_point_index = None
-        clicked_shape = None
-        
+        shape, part = self.get_shape_at_pos(pos) if hit is None else hit
         if event.button() == QtCore.Qt.LeftButton:
-            modifiers = event.modifiers()
-            ctrl_pressed = modifiers & QtCore.Qt.ControlModifier
-            clicked_shape, clicked_point_index = self.get_shape_at_pos(pos)
-
-            if clicked_shape:
-                if clicked_shape.shape_type !='rotated_rectangle':
-                    if clicked_point_index is not None:
-                        
-                        # 进入拖动点模式
-                        self.selected_shape = [clicked_shape]
-                        self.hovered_point_index = clicked_point_index
-
-                        print(f"Clicked on point {clicked_point_index} of shape {clicked_shape}")
-                        clicked_shape.selected = True
-                        print(f"Selected shape: {clicked_shape}. Selected: {clicked_shape.selected} from handle_editmode_mouse_press")
-                        # self.set_selected_shapes([clicked_shape])
-                        self.shapeSelected.emit([clicked_shape])
-                        self.setCursor(QtCore.Qt.CrossCursor)
-                        self.dragging_point = True
-                        self.drag_start_pos = pos
-                        self.save_state()
-                        self.shapesChanged.emit()
-                        self.update()
-                        return
-                    
-                    else:
-                        # 2. 检查是否点击在线段上（用于添加点，仅对polygon有效）
-                        for shape in reversed(self.shapes):
-                            if shape.visible and shape.shape_type == 'polygon' and shape.selected:
-                                line_index = self.which_line_closest(shape, pos)
-                                
-                                if line_index != -1:
-                                    shape.add_point(line_index, pos)
-                                    shape.selected = True
-                                    self.selected_shape = [shape]
-                                    self.shapeSelected.emit([shape])
-                                    self.save_state()
-                                    self.shapesChanged.emit()
-                                    shape.update_shape()
-                                    return
-
-                        # 3. 检查是否点击在形状内部（用于拖动整个形状）
-                        for shape in reversed(self.shapes):
-                            if shape.visible and self.is_pos_inside_shape(shape, pos):
-                                if ctrl_pressed:
-                                    # Ctrl 被按下，进行多选
-                                    if shape in self.selected_shape:
-                                        # 如果形状已被选中，取消选中
-                                        self.selected_shape.remove(shape)
-                                        shape.selected = False
-                                    else:
-                                        # 添加形状到选中列表
-                                        self.selected_shape.append(shape)
-                                        shape.selected = True
-                                    
-                                    self.set_selected_shapes(self.selected_shape)
-                                    self.shapeSelected.emit(self.selected_shape)
-                                    self.save_state()
-                                    self.shapesChanged.emit()
-                                    self.update()
-                                
-
-                                else:
-                                    # 未按下 Ctrl，选择单个形状
-
-                                    for s in self.selected_shape:
-                                        s.selected = False
-                                    self.selected_shape = [shape]
-                                    shape.selected = True
-
-
-                                self.set_selected_shapes(self.selected_shape)
-                                self.shapeSelected.emit(self.selected_shape)
-                                self.update()
-
-                            # 开始拖动选中的形状
-                                if self.selected_shape:
-                                    self.moving_shape = True
-                                    self.drag_start_pos = pos
-                                    self.save_state()
-                                    self.shapesChanged.emit()
-                                    self.setCursor(QtCore.Qt.ClosedHandCursor)
-                                return
-                            
-                        # 4. 点击空白区域，取消所有选中状态
-                        self.set_selected_shapes([])
-                        self.shapeSelected.emit([])
-            
-                        self.update()
-                elif clicked_shape.shape_type == 'rotated_rectangle':
-                    self.handle_editmode_mouse_press_rotated_rectangle(event, clicked_shape, clicked_point_index)
-            else:
+            if shape is None:
                 self.set_selected_shapes([])
-                self.update()
                 return
+            if event.modifiers() & QtCore.Qt.ControlModifier:
+                self._select_edit_target(event, shape)
+                return
+            # Insertion belongs to the actual hit polygon, never another selected one.
+            if part in (None, 'edge'):
+                edge = self._polygon_edge_target(shape, pos)
+                if edge is not None:
+                    self.save_state()
+                    line_index, projection = edge
+                    shape.add_point(line_index, projection)
+                    self.set_selected_shapes([shape])
+                    self.shapesChanged.emit()
+                    self.update(shape.visual_bounds())
+                    return
+            self._select_edit_target(event, shape, preserve_group=not isinstance(part, int))
+            if isinstance(part, int):
+                self.hovered_point_index = part
+                self.dragging_point = True
+                self.setCursor(QtCore.Qt.CrossCursor)
+            else:
+                self.moving_shape = True
+                self.setCursor(QtCore.Qt.ClosedHandCursor)
         elif event.button() == QtCore.Qt.RightButton:
-            modifiers = event.modifiers()
-            ctrl_pressed = modifiers & QtCore.Qt.ControlModifier
-            clicked_shape, _ = self.get_shape_at_pos(pos)
-            if not clicked_shape:
-                # 右键点击空白区域，无需操作
+            if shape is None:
                 self.set_selected_shapes([])
-                self.update()
-                return
-            if clicked_shape.shape_type == 'rotated_rectangle':
-                self.handle_editmode_mouse_press_rotated_rectangle(event, clicked_shape, clicked_point_index)
-                return
-            else:
-                if ctrl_pressed:
-                    # 按住Ctrl并右键点击，删除多个点
-                    self.delete_polygon_multiple_points(pos)
+            elif shape.shape_type == 'polygon' and shape.selected:
+                if event.modifiers() & QtCore.Qt.ControlModifier:
+                    self.delete_polygon_multiple_points(pos, shape)
                 else:
-                    # 正常右键点击，删除单个点
-                    self.delete_polygon_single_point(pos)
-
-        super(Canvas, self).mousePressEvent(event)
+                    self.delete_polygon_single_point(pos, shape)
 
 ###############################################
 ############ 关于右键删除多边形的点是删除单个点还是多个点
@@ -2197,7 +2142,10 @@ class Canvas(QtWidgets.QGraphicsObject):
 
         # 计算局部点密度
         # 计算半径 radius 内的点数量
-        points_in_radius = sum(1 for _, dist in distances if dist <= radius)
+        distances = [(i, dist) for i, dist in distances if dist <= radius]
+        points_in_radius = len(distances)
+        if not distances:
+            return []
 
         # 根据局部密度确定要删除的点数量
         # 局部密度越高，删除的点越多，但在count_range范围内
@@ -2208,57 +2156,43 @@ class Canvas(QtWidgets.QGraphicsObject):
         points_to_remove = int(min_count + density_factor * (max_count - min_count))
 
         # 限制删除点的数量，不能太多以至于破坏多边形
-        max_points_to_remove = max(0, min(points_to_remove, len(shape.pointslist) - 3))  # 至少保留3个点
+        max_points_to_remove = max(0, min(points_to_remove,
+                                           len(shape.pointslist) - MIN_POLYGON_VERTICES))
 
         # 返回要删除的点的索引列表
         return [idx for idx, _ in distances[:max_points_to_remove]]
 
-    def delete_polygon_multiple_points(self, pos):
-        """
-        删除多边形上距离指定位置最近的多个点
+    def delete_polygon_multiple_points(self, pos, shape=None):
+        shape = shape if shape is not None else self.get_shape_at_pos(pos)[0]
+        if (shape is None or shape.shape_type != 'polygon' or not shape.selected
+                or not any(s is shape for s in self.shapes)):
+            return False
+        indices = self.get_multiple_points_of_a_polygon_at_pos(pos, shape)
+        if not indices:
+            return False
+        self.save_state()
+        for index in sorted(indices, reverse=True):
+            shape.remove_point(index)
+        self.shapesChanged.emit()
+        self.update()
+        return True
 
-        参数:
-        pos -- 鼠标位置
-
-        返回:
-        是否成功删除多个点
-        """
-        for shape in reversed(self.shapes):
-            if shape.visible and shape.shape_type == 'polygon' and shape.selected:
-                # 获取要删除的点的索引
-                points_to_delete = self.get_multiple_points_of_a_polygon_at_pos(pos, shape)
-
-                if not points_to_delete:
-                    return False  # 没有找到要删除的点
-                self.save_state()
-
-                # 按索引从大到小排序，以便删除时不会影响其他索引
-                points_to_delete.sort(reverse=True)
-
-                # 删除点
-                for idx in points_to_delete:
-                    if len(shape.pointslist) > 3:  # 确保多边形至少保留3个点
-                        shape.remove_point(idx)
-                        shape.update_shape()
-
-
-                self.shapesChanged.emit()
-                return True
-
-        return False
-
-    def delete_polygon_single_point(self, pos):
-        """删除polygon在指定位置的点"""
-        for shape in reversed(self.shapes):
-            if shape.visible and shape.shape_type == 'polygon' and shape.selected:
-                shape, index = self.get_shape_at_pos(pos, tolerance=10)
-                if shape and index is not None:
-                    self.save_state()
-                    shape.remove_point(index)
-                    self.shapesChanged.emit()
-                    self.update()
-                    return True
-        return False
+    def delete_polygon_single_point(self, pos, shape=None):
+        shape = shape if shape is not None else self.get_shape_at_pos(pos, tolerance=10)[0]
+        if (shape is None or shape.shape_type != 'polygon' or not shape.selected
+                or len(shape.pointslist) <= MIN_POLYGON_VERTICES
+                or not any(s is shape for s in self.shapes)):
+            if shape is not None and shape.shape_type == 'polygon' and len(shape.pointslist) == MIN_POLYGON_VERTICES:
+                self._geometry_notice('A polygon must contain at least 5 points.')
+            return False
+        index = self.find_closest_vertex(pos, shape.pointslist, tolerance=10)
+        if index < 0:
+            return False
+        self.save_state()
+        shape.remove_point(index)
+        self.shapesChanged.emit()
+        self.update()
+        return True
 
 ###############################################
 ############ 关于鼠标事件代码===========Move
@@ -2271,6 +2205,10 @@ class Canvas(QtWidgets.QGraphicsObject):
 
         if self.mode == 'create' and self.drawing:
             if self.create_shape_type == 'rectangle':
+                first = self.current_shape.pointslist[0]
+                previous = (self.current_shape.pointslist[1]
+                            if len(self.current_shape.pointslist) == 2 else None)
+                pos = self._clamp_rectangle_corner(first, pos, previous)
                 if len(self.current_shape.pointslist) == 1:
                     self.current_shape.pointslist.append(pos)
                 else:
@@ -2293,7 +2231,13 @@ class Canvas(QtWidgets.QGraphicsObject):
                 
         ################### 编辑模式下 鼠标 运动事件
         elif self.mode == 'edit':
+            if not self._prepare_geometry_edit(event):
+                super(Canvas, self).mouseMoveEvent(event)
+                return
             shapes_to_update = []
+            old_region = QtCore.QRectF()
+            for selected in self.selected_shape:
+                old_region = old_region.united(selected.visual_bounds(scale=None if display.current.auto_scale else self.scale_factor))
             ### 对于旋转矩形的 旋转事件
             if self.rotating and self.rotating_shape:
                 # 保存旧状态
@@ -2319,14 +2263,27 @@ class Canvas(QtWidgets.QGraphicsObject):
                 moving_point = pos
                 fixed_point = self.scaling_fixed_point
                 anchor_index = self.scaling_anchor_index
-                self.scaling_shape.scale_rotated_rectangle(anchor_index, moving_point, fixed_point)
+                self.scaling_shape.scale_rotated_rectangle(
+                    anchor_index, moving_point, fixed_point, self._minimum_rectangle_size())
                 self.scaling_shape.update_shape()  # 只更新当前形状
 
             ### 对于旋转矩形和其他shape的移动事件
             elif self.moving_shape and self.selected_shape:
 
-                dx = pos.x() - self.moving_start_pos.x()
-                dy = pos.y() - self.moving_start_pos.y()
+                delta = pos - self.drag_start_pos
+                # Clamp a shared translation using Point bounds only. Other types
+                # retain geometry and relative offsets; existing annotations are not normalized.
+                points = [before[0] for shape,before in self._edit_original
+                          if shape.shape_type == 'point' and len(before) == 1]
+                if points:
+                    low_x,high_x = max(-x for x,y in points), min(self.image_size.width()-x for x,y in points)
+                    low_y,high_y = max(-y for x,y in points), min(self.image_size.height()-y for x,y in points)
+                    if low_x > high_x or low_y > high_y:
+                        delta = QPointF()
+                    else:
+                        delta = QPointF(min(max(delta.x(),low_x),high_x), min(max(delta.y(),low_y),high_y))
+                dx,dy = delta.x()-self._move_applied.x(), delta.y()-self._move_applied.y()
+                self._move_applied = delta
 
                 for shape in self.selected_shape:
                     shape._dirty = True
@@ -2343,16 +2300,20 @@ class Canvas(QtWidgets.QGraphicsObject):
                 
                 # 更新点位置
                 index = self.hovered_point_index
+                if shape.shape_type == 'rectangle' and len(shape.pointslist) == 2:
+                    pos = self._clamp_rectangle_corner(shape.pointslist[1-index], pos,
+                                                       shape.pointslist[index])
                 shape.pointslist[index] = pos
-                self.shapesChanged.emit()
                 shape._dirty = True
                 shape.update()  # 只更新当前形状
             
            
         # 如果有形状需要更新，只更新这些形状
             if shapes_to_update:
-                # 标记需要重绘的区域更大一点，确保覆盖完整
-                self.update()
+                region = old_region
+                for changed in shapes_to_update:
+                    region = region.united(changed.visual_bounds(scale=None if display.current.auto_scale else self.scale_factor))
+                self.update(region)
             
 
             
@@ -2370,7 +2331,7 @@ class Canvas(QtWidgets.QGraphicsObject):
                 tolerance = 3  # 允许的最小移动距离
                 moved_distance = (end_point - self.start_point_at_create_mode).manhattanLength()
 
-                if moved_distance <= tolerance:
+                if moved_distance <= tolerance and self.create_shape_type == 'line':
                     # 鼠标没有移动，不创建形状
                     self.current_shape = None  # 重置当前形状
                     self.drawing = False
@@ -2379,6 +2340,11 @@ class Canvas(QtWidgets.QGraphicsObject):
 
 
                 if self.create_shape_type == 'rectangle':
+                    first = self.current_shape.pointslist[0]
+                    previous = (self.current_shape.pointslist[1]
+                                if len(self.current_shape.pointslist) == 2 else None)
+                    corner = self._clamp_rectangle_corner(first, end_point, previous)
+                    self.current_shape.pointslist = [first, corner]
                     self.finish_shape()
                     self.drawing = False
                     
@@ -2394,43 +2360,24 @@ class Canvas(QtWidgets.QGraphicsObject):
                         # 检查移动距离是否足够
 
                         start_point = self.current_shape.pointslist[0]
-                        moved_distance = _calculate_distance_numba(
-                            start_point.x(), start_point.y(), pos.x(), pos.y())
-                        if moved_distance < 5:  # 移动太小，不处理
-                            print("移动距离太小，无法确定边长")
-                            # 重置状态
-                            self.current_shape = None
-                            self.drawing = False
-                            self.rotated_rect_stage = 0
-                            self.update()
-                            return
-                        
                         # 添加第二个点，完成第一条边的创建
-                        self.current_shape.pointslist.append(pos)
+                        self.current_shape.pointslist.append(
+                            self._clamp_rotated_first_edge(start_point, pos))
                         self.rotated_rect_stage = 2  # 进入第二阶段
                         self.drawing = True
                         self.update()  # 立即更新显示
 
 
         elif self.mode == 'edit':
-            if event.button() == QtCore.Qt.LeftButton:
-                self.scaling_rotated_rectangle = False
-                self.hovered_point_index = None
-                self.moving_shape = False
-                self.rotating = False
-                self.setCursor(QtCore.Qt.ArrowCursor)
-
-            if self.dragging_point:
-                self.dragging_point = False
-                self.scaling_rotated_rectangle = False
-                self.scaling_shape = None
-                self.hovered_point_index = None
-                self.scaling_anchor_index = None
-                self.scaling_fixed_index = None
-                self.scaling_fixed_point = None
-                self.setCursor(QtCore.Qt.ArrowCursor)
-                self.update()
-
+            if self._finish_geometry_edit():
+                self.shapesChanged.emit()
+                # Preview already painted old/new geometry; only finish this region.
+                region = QtCore.QRectF()
+                for shape in self.selected_shape:
+                    region = region.united(shape.visual_bounds(
+                        scale=None if display.current.auto_scale else self.scale_factor))
+                if not region.isEmpty():
+                    self.update(region)
         super(Canvas, self).mouseReleaseEvent(event)
 
 ###############################################
@@ -2439,7 +2386,5 @@ class Canvas(QtWidgets.QGraphicsObject):
     def mouseDoubleClickEvent(self, event):
         """处理双击事件"""
         if self.mode == 'create' and self.create_shape_type == 'polygon':
-            if self.drawing and len(self.current_shape.pointslist) >= 3:
-                # 将当前点与第一个点连接，形成闭合多边形
-                self.current_shape.pointslist.append(self.current_shape.pointslist[0])
+            if self.drawing:
                 self.finish_shape()

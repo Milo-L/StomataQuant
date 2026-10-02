@@ -1,3 +1,4 @@
+from measurements import positive_number, validated_scale
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import QEventLoop, QPropertyAnimation, QRect, QEasingCurve, Qt, QTimer, pyqtProperty
 from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPixmap
@@ -7,7 +8,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import os
+import sys
 import tempfile
+from macos_paths import macos_output_dir
 
 
 
@@ -17,18 +20,20 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QCheckBox, QPushButton, QGrou
 from PyQt5.QtCore import Qt, QTimer, QEventLoop
 import os
 import time
+from dialog_ui import ResponsiveDialog
 
-class BatchProcessingDialog(QDialog):
+class BatchProcessingDialog(ResponsiveDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent  # 保存父窗口引用
+        self.parent_window = parent
         self.setWindowTitle("Batch Processing Options")
-        self.resize(450, 400)  # 增加对话框高度以适应新内容
         
         layout = QVBoxLayout()
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
         
         # 添加当前打开的标签页数量信息
-        tab_count = self.parent.tabWidget.count() if self.parent and hasattr(self.parent, 'tabWidget') else 0
+        tab_count = self.parent_window.tabWidget.count() if self.parent_window and hasattr(self.parent_window, 'tabWidget') else 0
         self.tab_info_label = QLabel(f"The current number of open images: {tab_count}")
         self.tab_info_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
         layout.addWidget(self.tab_info_label)
@@ -44,24 +49,26 @@ class BatchProcessingDialog(QDialog):
         layout.addWidget(self.ai_checkbox)
         # 创建一个水平布局，包含模型信息标签和更换模型按钮
         model_info_layout = QHBoxLayout()
+        model_info_layout.setSpacing(12)
         
         # 模型信息显示
-        self.model_info_label = QLabel("Model: Not loaded")
+        self.model_info_label = QLabel("Model: No model loaded")
         self.model_info_label.setStyleSheet("color: gray; margin-left: 20px;")
-        model_info_layout.addWidget(self.model_info_label)
+        self.model_info_label.setWordWrap(True)
+        model_info_layout.addWidget(self.model_info_label, 1)
 
         # 添加更换模型按钮
         self.change_model_button = QPushButton("Change the model")
         self.change_model_button.clicked.connect(self.change_model)
         model_info_layout.addWidget(self.change_model_button)
     
-        model_info_layout.addStretch()  # 添加伸缩空间，使控件靠左对齐
         layout.addLayout(model_info_layout)
         
         # 添加推理设置按钮
         self.inference_settings_button = QPushButton("Inference Settings")
         self.inference_settings_button.clicked.connect(self.open_inference_settings)
         inference_button_layout = QHBoxLayout()
+        inference_button_layout.setContentsMargins(0, 0, 0, 0)
         inference_button_layout.addSpacing(20)  # 添加缩进
         inference_button_layout.addWidget(self.inference_settings_button)
         inference_button_layout.addStretch()  # 让按钮不要占据整行
@@ -92,7 +99,7 @@ class BatchProcessingDialog(QDialog):
         class_visibility_layout = QVBoxLayout()
 
         # ClassNum 0 行
-        class_num_0_layout = QHBoxLayout()
+        class_num_0_layout = QVBoxLayout()
         class_num_0_label = QLabel("Class num 0 (stoma):")
         self.class_num_0_radio_group = QButtonGroup(self)
         self.class_num_0_true = QRadioButton("True")
@@ -101,12 +108,15 @@ class BatchProcessingDialog(QDialog):
         self.class_num_0_radio_group.addButton(self.class_num_0_false)
         self.class_num_0_true.setChecked(True)  # 默认选择 True
         class_num_0_layout.addWidget(class_num_0_label)
-        class_num_0_layout.addWidget(self.class_num_0_true)
-        class_num_0_layout.addWidget(self.class_num_0_false)
+        class_num_0_choices = QHBoxLayout()
+        class_num_0_choices.addWidget(self.class_num_0_true)
+        class_num_0_choices.addWidget(self.class_num_0_false)
+        class_num_0_choices.addStretch()
+        class_num_0_layout.addLayout(class_num_0_choices)
         class_visibility_layout.addLayout(class_num_0_layout)
 
         # ClassNum 1 行
-        class_num_1_layout = QHBoxLayout()
+        class_num_1_layout = QVBoxLayout()
         class_num_1_label = QLabel("Class num 1 (pore or pavement cell):")
         self.class_num_1_radio_group = QButtonGroup(self)
         self.class_num_1_true = QRadioButton("True")
@@ -115,8 +125,11 @@ class BatchProcessingDialog(QDialog):
         self.class_num_1_radio_group.addButton(self.class_num_1_false)
         self.class_num_1_true.setChecked(True)  # 默认选择 True
         class_num_1_layout.addWidget(class_num_1_label)
-        class_num_1_layout.addWidget(self.class_num_1_true)
-        class_num_1_layout.addWidget(self.class_num_1_false)
+        class_num_1_choices = QHBoxLayout()
+        class_num_1_choices.addWidget(self.class_num_1_true)
+        class_num_1_choices.addWidget(self.class_num_1_false)
+        class_num_1_choices.addStretch()
+        class_num_1_layout.addLayout(class_num_1_choices)
         class_visibility_layout.addLayout(class_num_1_layout)
 
         class_visibility_group.setLayout(class_visibility_layout)
@@ -170,32 +183,6 @@ class BatchProcessingDialog(QDialog):
         self.mer_checkbox.stateChanged.connect(self.update_hide_polygons_group)
         # 新增代码结束
 
-        # Feature Extraction
-        self.feature_extraction_checkbox = QCheckBox("Feature Extraction")
-        layout.addWidget(self.feature_extraction_checkbox)
-
-        # 添加全局比例尺选项
-        self.global_scale_checkbox = QCheckBox("Use global scale for all images (if available)")
-        has_global_scale = parent and hasattr(parent, 'global_scale_info') and parent.global_scale_info
-
-        # 如果有全局比例尺，显示比例尺信息并强制选中且不可更改
-        if has_global_scale:
-            scale = parent.global_scale_info.get('scale', 1.0)
-            unit = parent.global_scale_info.get('unit', 'pixel')
-            self.global_scale_checkbox.setText(f"Use global scale for all images (1 pixel = {scale} {unit})")
-            self.global_scale_checkbox.setChecked(True)
-            # 设置样式，让用户知道这个复选框是强制选中的
-            self.global_scale_checkbox.setStyleSheet("QCheckBox::indicator { background-color: #e0f0e0; }")
-            # 创建标志，表示这是强制选中的
-            self.force_global_scale = True
-        else:
-            self.global_scale_checkbox.setText("Use global scale for all images (not set)")
-            self.global_scale_checkbox.setEnabled(False)
-            self.force_global_scale = False
-                
-        self.feature_extraction_checkbox.stateChanged.connect(self.on_feature_extraction_checked)
-        layout.addWidget(self.global_scale_checkbox)
-        
         # Heat Map
         self.heatmap_checkbox = QCheckBox("Generate Heat Map")
         layout.addWidget(self.heatmap_checkbox)
@@ -219,69 +206,43 @@ class BatchProcessingDialog(QDialog):
         # 添加热图设置相关的属性
         self.heatmap_settings = None
     
+    def showEvent(self, event):
+        self.update_model_info()
+        super().showEvent(event)
+
     def change_model(self):
         """打开模型选择对话框"""
-        if hasattr(self.parent, 'load_model'):
-            self.parent.load_model()
+        if hasattr(self.parent_window, 'load_model'):
+            self.parent_window.load_model()
             # 延迟更新模型信息，确保模型加载完成
-            QTimer.singleShot(500, self.update_model_info)
+            self.update_model_info()
 
     def update_model_info(self):
         """更新模型信息显示"""
-        if hasattr(self.parent, 'model') and self.parent.model:
+        if hasattr(self.parent_window, 'model') and self.parent_window.model:
             # 获取模型名称
-            if hasattr(self.parent.model, 'model_name'):
-                model_name = self.parent.model.model_name
-            else:
-                model_name = "Unknown Model"
+            model_name = os.path.basename(str(
+                getattr(self.parent_window.model, '_stomataquant_source_path', None)
+                or getattr(self.parent_window.model, 'model_name', 'Unknown Model')))
             self.model_info_label.setText(f"Model: {model_name}")
             self.model_info_label.setStyleSheet("color: green; margin-left: 20px;")
             self.inference_settings_button.setEnabled(True)
         else:
-            self.model_info_label.setText("Model: Not loaded")
+            self.model_info_label.setText("Model: No model loaded")
             self.model_info_label.setStyleSheet("color: red; margin-left: 20px;")
             self.inference_settings_button.setEnabled(False)
             self.ai_checkbox.setChecked(False)
-            self.ai_checkbox.setEnabled(False)
-    def on_feature_extraction_checked(self, state):
-        """处理特征提取复选框的状态变化"""
-        # 如果有全局比例尺信息，根据特征提取复选框的状态启用/禁用全局比例尺复选框
-        has_global_scale = self.parent and hasattr(self.parent, 'global_scale_info') and self.parent.global_scale_info
-        if has_global_scale:
-            self.global_scale_checkbox.setEnabled(state == Qt.Checked)
-        else:
-            self.global_scale_checkbox.setEnabled(False)
-        
-        # 如果取消了特征提取，同时取消热图选项
-        if state == Qt.Unchecked and self.heatmap_checkbox.isChecked():
-            self.heatmap_checkbox.setChecked(False)
+            self.ai_checkbox.setEnabled(True)
     def open_inference_settings(self):
         """打开推理设置对话框"""
-        if hasattr(self.parent, 'show_inference_settings'):
-            self.parent.show_inference_settings()
+        if hasattr(self.parent_window, 'show_inference_settings'):
+            self.parent_window.show_inference_settings()
     
     def on_heatmap_checked(self, state):
         """处理热图复选框的勾选状态变化"""
         if state == Qt.Checked:
             # 如果选中了热图功能，先检查是否勾选了特征提取
-            if not self.feature_extraction_checkbox.isChecked():
-                # 询问用户是否同时启用特征提取
-                reply = QMessageBox.question(
-                    self,
-                    "Notice",
-                    "Generating a heatmap requires feature extraction to be performed first. Do you want to enable feature extraction simultaneously?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
-                if reply == QMessageBox.Yes:
-                    self.feature_extraction_checkbox.setChecked(True)
-                else:
-                    self.heatmap_checkbox.setChecked(False)
-                    return
-            
-            # 查找主窗口，以获取其全局比例尺信息
-            # 查找主窗口，以获取其全局比例尺信息
-            main_window = self.parent
+            main_window = self.parent_window
             while main_window and not hasattr(main_window, 'tabWidget'):
                 if hasattr(main_window, 'parent'):
                     # 修复: 安全地获取父对象，同时处理属性和方法两种情况
@@ -311,14 +272,12 @@ class BatchProcessingDialog(QDialog):
                     # 如果是全局比例尺，也更新到主窗口
                     if hasattr(dialog, 'scale_info') and dialog.scale_info.get('is_global', False):
                         if main_window and hasattr(main_window, 'global_scale_info'):
-                            main_window.global_scale_info = dialog.scale_info
+                            from measurements import apply_scale
+                            apply_scale(main_window, None, dialog.scale_info, True)
                             # 更新本对话框的全局比例尺显示
                             has_global_scale = True
                             scale = dialog.scale_info.get('scale', 1.0)
                             unit = dialog.scale_info.get('unit', 'pixel')
-                            self.global_scale_checkbox.setText(f"Use global scale for all images (1 pixel = {scale} {unit})")
-                            self.global_scale_checkbox.setChecked(True)
-                            self.global_scale_checkbox.setEnabled(True)
                 
                 # 检查选择的特征是否需要比例尺，但没有设置比例尺
                 feature_name = self.heatmap_settings.get("feature", "")
@@ -356,7 +315,6 @@ class BatchProcessingDialog(QDialog):
             "show_points": self.show_points_checkbox.isChecked(),
             "mer": self.mer_checkbox.isChecked(),
             "hide_original_polygons": self.hide_polygons_yes.isChecked(),
-            "feature_extraction": self.feature_extraction_checkbox.isChecked(),
             "heatmap": self.heatmap_checkbox.isChecked(),
             "heatmap_settings": self.heatmap_settings,
             # 添加类别可见性设置 - 新增代码
@@ -391,7 +349,7 @@ class BatchProcessingDialog(QDialog):
         # 如果是热图被选中
         elif sender == self.heatmap_checkbox and state == Qt.Checked:
             self.show_points_checkbox.setChecked(False)
-class BatchProgressDialog(QDialog):
+class BatchProgressDialog(ResponsiveDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Batch Processing Progress")
@@ -434,26 +392,36 @@ class BatchProgressDialog(QDialog):
         layout.addWidget(self.status_label)
         
         # Cancel button
-        self.cancel_button = QPushButton("Please wait...")
+        self.cancel_button = QPushButton("Cancel")
         # self.cancel_button.clicked.connect(self.reject)
-        self.cancel_button.setEnabled(False)  # 一开始就禁用取消按钮
+        self.cancel_button.clicked.connect(self.reject)
         layout.addWidget(self.cancel_button, alignment=Qt.AlignRight)
         
         self.setLayout(layout)
         self.canceled = False
+        self.can_close = False
 
     def closeEvent(self, event):
-        # 如果不允许关闭，则忽略关闭事件
         if not self.can_close:
+            self.reject()
             event.ignore()
         else:
             super().closeEvent(event)
+
+    def reject(self):
+        if self.can_close:
+            super().reject()
+        else:
+            self.canceled = True
+            self.cancel_button.setEnabled(False)
+            self.update_status('Cancel requested; waiting for the current stage to stop safely...')
     
     # 添加一个方法，允许在批处理完成后关闭对话框
     def allow_close(self):
         self.can_close = True
         self.cancel_button.setText("Close")
         self.cancel_button.setEnabled(True)
+        self.cancel_button.clicked.disconnect()
         self.cancel_button.clicked.connect(self.accept)
         
     def set_tab_info(self, current, total):
@@ -476,13 +444,14 @@ class BatchProgressDialog(QDialog):
         self.file_label.setText(f"File: {file_name}")
     
     def update_status(self, status):
+        self.last_status = status
         self.status_label.setText(f"Status: {status}")
 
 #################################################################
 # 推理设置对话栏
 # InferenceSettingsDialog
 #################################################################
-class InferenceSettingsDialog(QtWidgets.QDialog):
+class InferenceSettingsDialog(ResponsiveDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Inference settings")
@@ -496,6 +465,8 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         """创建带有问号图标和工具提示的标签布局"""
         container = QtWidgets.QHBoxLayout()
         label = QtWidgets.QLabel(text)
+        label.setMinimumWidth(170)
+        label.setWordWrap(True)
 
         # 创建问号图标标签
         help_icon = QtWidgets.QLabel("?")
@@ -533,9 +504,8 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         help_icon.setAttribute(QtCore.Qt.WA_Hover, True)
         help_icon.setMouseTracking(True)
 
-        container.addWidget(label)
+        container.addWidget(label, 1)
         container.addWidget(help_icon)
-        container.addStretch()
 
         layout.addLayout(container)
         return label
@@ -568,7 +538,9 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         self.imgsz_spinbox.setValue(settings.get("imgsz", 1024))
         self.max_det_spinbox.setValue(settings.get("max_det", 500))
         
-        self.save_path_edit.setText(settings.get("save_path", os.path.join(os.getcwd(), "Inference_OutPut")))
+        default_path = (macos_output_dir("Inference_OutPut") if sys.platform == "darwin"
+                        else os.path.join(os.getcwd(), "Inference_OutPut"))
+        self.save_path_edit.setText(settings.get("save_path", default_path))
         
     def load_default_settings(self):
         self.conf_spinbox.setValue(0.5)
@@ -576,15 +548,20 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         self.device_combobox.setCurrentText("GPU" if self.gpu_available else "CPU")
         self.imgsz_spinbox.setValue(1024)  # 默认图像大小
         self.max_det_spinbox.setValue(500)  # 默认最大检测数量
-        self.save_path_edit.setText(os.path.join(os.getcwd(), "Inference_OutPut"))
+        if sys.platform == "darwin":
+            self.save_path_edit.setText(macos_output_dir("Inference_OutPut"))
+        else:
+            self.save_path_edit.setText(os.path.join(os.getcwd(), "Inference_OutPut"))
 
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
 
         # 使用带问号图标的标签替换原始标签
         self.create_label_with_tooltip(
             layout, 
-            "conf, the default value is 0.5.", 
+            "Confidence", 
             "Sets the minimum confidence threshold for detections. "
             "Objects detected with confidence below this threshold will be disregarded."
         )
@@ -595,7 +572,7 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
 
         self.create_label_with_tooltip(
             layout, 
-            "iou, the default value is 0.7", 
+            "IoU", 
             "Intersection Over Union (IoU) threshold for Non-Maximum Suppression (NMS). "
             "Lower values result in fewer detections by eliminating overlapping boxes, useful for reducing duplicates."
         )
@@ -607,7 +584,7 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         # 新增控件：图像大小
         self.create_label_with_tooltip(
             layout, 
-            "Image Size (imgsz), recommended to use 1024", 
+            "Image Size", 
             "If the inference speed is too slow, one can resort to 640 (at the expense of accuracy). "
             "Defines the image size for inference. Can be a single integer for square resizing or a (height, width) tuple."
         )
@@ -620,7 +597,7 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
         # 新增控件：最大检测数量
         self.create_label_with_tooltip(
             layout, 
-            "Maximum Detections (max_det), recommended to use 500", 
+            "Max Detection", 
             "Maximum number of detections allowed per image."
             " Limits the total number of objects the model can detect in a single inference, preventing excessive outputs in dense scenes."
         )
@@ -648,7 +625,10 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
 
         self.save_path_label = QtWidgets.QLabel("Save results file path:")
         self.save_path_edit = QtWidgets.QLineEdit()
-        self.save_path_edit.setText(os.path.join(os.getcwd(), "Inference_OutPut"))  # 默认保存路径
+        if sys.platform == "darwin":
+            self.save_path_edit.setText(macos_output_dir("Inference_OutPut"))
+        else:
+            self.save_path_edit.setText(os.path.join(os.getcwd(), "Inference_OutPut"))  # 默认保存路径
         self.save_path_button = QtWidgets.QPushButton("Browse")
         self.save_path_button.clicked.connect(self.browse_save_path)
         save_path_layout = QtWidgets.QHBoxLayout()
@@ -712,97 +692,10 @@ class InferenceSettingsDialog(QtWidgets.QDialog):
 # SetMeasuringScaleDialog
 #################################################################
 
-class SetMeasuringScaleDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.parent = parent
-        self.setWindowTitle("Set the measurement scale")
+from scale_dialog import SetMeasuringScaleDialog
 
-        # 创建控件
-        self.pixel_distance_label = QLabel("Pixels Distance:")
-        self.pixel_distance_edit = QLineEdit()
 
-        self.real_distance_label = QLabel("Known Real Distance:")
-        self.real_distance_edit = QLineEdit()
-
-        self.unit_label = QLabel("Unit of Length:")
-        self.unit_combo = QComboBox()
-        self.unit_combo.addItems(["nm","μm", "mm", "cm", "m", "km"])  # 根据需要添加单位
-
-        self.global_checkbox = QCheckBox("Global?(Applicable to all images)")
-
-        self.ok_button = QPushButton("OK")
-        self.cancel_button = QPushButton("Cancel")
-
-        # 布局
-        layout = QVBoxLayout()
-        layout.addWidget(self.pixel_distance_label)
-        layout.addWidget(self.pixel_distance_edit)
-        layout.addWidget(self.real_distance_label)
-        layout.addWidget(self.real_distance_edit)
-        layout.addWidget(self.unit_label)
-        layout.addWidget(self.unit_combo)
-        layout.addWidget(self.global_checkbox)
-
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.ok_button)
-        button_layout.addWidget(self.cancel_button)
-        layout.addLayout(button_layout)
-
-        self.setLayout(layout)
-
-        # 连接信号
-        self.ok_button.clicked.connect(self.accept)
-        self.cancel_button.clicked.connect(self.reject)
-        
-        # 加载已有比例尺信息（如果有）
-        self.load_existing_scale_info()
-    
-    def load_existing_scale_info(self):
-        """加载现有的比例尺信息作为默认值"""
-        scale_info = None
-        
-        # 首先尝试获取全局比例尺信息
-        if self.parent and hasattr(self.parent, 'global_scale_info') and self.parent.global_scale_info:
-            scale_info = self.parent.global_scale_info
-            # 如果是全局比例尺，默认勾选全局复选框
-            self.global_checkbox.setChecked(True)
-        # 如果没有全局比例尺，尝试获取当前视图的比例尺
-        elif self.parent and hasattr(self.parent, 'get_current_graphics_view'):
-            current_view = self.parent.get_current_graphics_view()
-            if current_view and hasattr(current_view, 'scale_info') and current_view.scale_info:
-                scale_info = current_view.scale_info
-                # 如果是局部比例尺，不勾选全局复选框
-                self.global_checkbox.setChecked(False)
-        
-        # 如果找到比例尺信息，填充到对话框中
-        if scale_info:
-            # 假设scale_info中有scale和unit字段
-            scale = scale_info.get('scale', 1.0)
-            unit = scale_info.get('unit', 'μm')
-            
-            # 假设是1:1的比例，即像素距离为1，实际距离为scale
-            self.pixel_distance_edit.setText("1")
-            self.real_distance_edit.setText(str(scale))
-            
-            # 设置单位下拉框
-            index = self.unit_combo.findText(unit)
-            if index >= 0:
-                self.unit_combo.setCurrentIndex(index)
-
-    def get_scale_info(self):
-        pixel_distance = float(self.pixel_distance_edit.text()) if self.pixel_distance_edit.text() else 0
-        real_distance = float(self.real_distance_edit.text()) if self.real_distance_edit.text() else 0
-        unit = self.unit_combo.currentText()
-        is_global = self.global_checkbox.isChecked()
-        return pixel_distance, real_distance, unit, is_global
-    
-#################################################################
-# 在每次创建完形状后弹出的对话栏，选择类别
-# LabelInputDialog
-#################################################################
-
-class LabelInputDialog(QDialog):
+class LabelInputDialog(ResponsiveDialog):
     def __init__(self, existing_labels, parent=None):
         super(LabelInputDialog, self).__init__(parent)
         self.setWindowTitle('Label Input Dialog')
@@ -920,7 +813,7 @@ class ShuttleProgressBar(QProgressBar):
         
         painter.end()
 
-class ProgressDialog(QDialog):
+class ProgressDialog(ResponsiveDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Processing")
@@ -993,7 +886,7 @@ class ProgressDialog(QDialog):
 # ColorSettingsDialog
 ##########################################################################
 
-class ColorSettingsDialog(QtWidgets.QDialog):
+class ColorSettingsDialog(ResponsiveDialog):
     def __init__(self, parent=None, color_map=None):
         super().__init__(parent)
         self.setWindowTitle("Color Settings")
@@ -1009,6 +902,7 @@ class ColorSettingsDialog(QtWidgets.QDialog):
         self.table.setHorizontalHeaderLabels(["Classnum", "Color"])
         self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         self.populate_table()
+        self.table.cellDoubleClicked.connect(self.change_color)
         layout.addWidget(self.table)
         
         # 添加按钮
@@ -1080,10 +974,83 @@ class ColorSettingsDialog(QtWidgets.QDialog):
             color_map[class_num] = color
         return color_map
         
-    def showEvent(self, event):
-        super().showEvent(event)
-        # 连接信号槽，避免在构造函数中连接导致的重复触发
-        self.table.cellDoubleClicked.connect(self.change_color)
+
+class DisplaySettingsDialog(ColorSettingsDialog):
+    """Colors and application-wide appearance, applied only after OK."""
+    def __init__(self, parent=None, color_map=None, appearance=None):
+        import display_settings as display
+        super().__init__(parent, color_map)
+        self.setWindowTitle("Display Settings")
+        appearance = appearance or display.current
+        root = self.layout()
+        root.removeWidget(self.table)
+        root.itemAt(0).layout().removeWidget(self.add_button)
+        self.tabs = QtWidgets.QTabWidget(self)
+        colors = QtWidgets.QWidget()
+        colors_layout = QtWidgets.QVBoxLayout(colors)
+        colors_layout.addWidget(self.table)
+        colors_layout.addWidget(self.add_button)
+        self.tabs.addTab(colors, "Colors")
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        self.auto_scale = QtWidgets.QCheckBox("Automatically adjust annotation size with zoom")
+        self.auto_scale.setChecked(appearance.auto_scale)
+        page_layout.addWidget(self.auto_scale)
+        self.size_controls = []
+
+        def size_control(form, key, label, minimum, maximum):
+            control = QtWidgets.QDoubleSpinBox()
+            control.setRange(minimum, maximum)
+            control.setDecimals(1)
+            control.setSingleStep(0.5)
+            control.setSuffix(" px")
+            control.setValue(getattr(appearance, key))
+            setattr(self, key, control)
+            self.size_controls.append(control)
+            form.addRow(label, control)
+
+        def style_control(form, key, label, choices):
+            control = QtWidgets.QComboBox()
+            for text, value in choices:
+                control.addItem(text, value)
+            control.setCurrentIndex(control.findData(getattr(appearance, key)))
+            setattr(self, key, control)
+            form.addRow(label, control)
+
+        points = QtWidgets.QGroupBox("Point Appearance")
+        form = QtWidgets.QFormLayout(points)
+        size_control(form, 'point_diameter', "Point Diameter", 2, 40)
+        size_control(form, 'point_outline_width', "Point Outline Width", 0.5, 10)
+        self.point_diameter.setToolTip("Outer diameter, including the outline, in screen pixels.")
+        self.point_outline_width.setToolTip("An outline as wide as the diameter fills the marker.")
+        style_control(form, 'point_style', "Point Style", [("Circle", "circle"), ("Square", "square"), ("Cross", "cross")])
+        page_layout.addWidget(points)
+        lines = QtWidgets.QGroupBox("Line Appearance")
+        form = QtWidgets.QFormLayout(lines)
+        size_control(form, 'line_width', "Line Width", 0.5, 10)
+        style_control(form, 'line_style', "Line Style", [("Solid", "solid"), ("Dashed", "dashed"), ("Dotted", "dotted"), ("Dash-Dot", "dash-dot")])
+        page_layout.addWidget(lines)
+        page_layout.addStretch()
+        self.tabs.addTab(page, "Annotation Appearance")
+        root.insertWidget(0, self.tabs)
+        self.auto_scale.toggled.connect(self.update_size_controls)
+        self.update_size_controls(appearance.auto_scale)
+        self.resize(540, 460)
+
+    def update_size_controls(self, automatic):
+        for control in self.size_controls:
+            control.setEnabled(not automatic)
+
+    def get_appearance(self):
+        import display_settings as display
+        return display.normalize({
+            'auto_scale': self.auto_scale.isChecked(),
+            'point_diameter': self.point_diameter.value(),
+            'point_outline_width': self.point_outline_width.value(),
+            'point_style': self.point_style.currentData(),
+            'line_width': self.line_width.value(),
+            'line_style': self.line_style.currentData(),
+        })
 
 
 ##########################################################################
@@ -1091,10 +1058,10 @@ class ColorSettingsDialog(QtWidgets.QDialog):
 # HeatMapDialog
 ##########################################################################
 
-class HeatMapDialog(QDialog):
+class HeatMapDialog(ResponsiveDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent  # 保存父窗口引用
+        self.parent_window = parent
         
         # 添加调试信息
         print(f"HeatMapDialog parent: {type(parent).__name__}")
@@ -1238,7 +1205,7 @@ class HeatMapDialog(QDialog):
     def load_scale_info(self):
         """加载当前比例尺信息"""
         # 尝试找到主窗口对象
-        main_window = self.parent
+        main_window = self.parent_window
         while main_window and not hasattr(main_window, 'tabWidget'):
             if hasattr(main_window, 'parent'):
                 # 修复: 安全地获取父对象，同时处理属性和方法两种情况
@@ -1254,20 +1221,16 @@ class HeatMapDialog(QDialog):
                 main_window = None
         
         # 首先尝试获取全局比例尺信息（从主窗口或当前父对象）
-        if main_window and hasattr(main_window, 'global_scale_info') and main_window.global_scale_info:
-            self.scale_info = main_window.global_scale_info
-            self.update_scale_info_display()
-        elif self.parent and hasattr(self.parent, 'global_scale_info') and self.parent.global_scale_info:
-            self.scale_info = self.parent.global_scale_info
-            self.update_scale_info_display()
+        from measurements import resolve_scale
+        if main_window and hasattr(main_window, 'get_current_graphics_view'):
+            view = main_window.get_current_graphics_view()
+            info = resolve_scale(main_window, view)
+            self.scale_info = dict(info, is_global=bool(getattr(main_window, 'global_scale_info', None))
+                                   and not getattr(view, '_scale_override', False)) if info else None
         else:
-            # 如果没有全局比例尺，尝试获取当前视图的比例尺信息
-            if main_window and hasattr(main_window, 'get_current_graphics_view'):
-                current_view = main_window.get_current_graphics_view()
-                if current_view and hasattr(current_view, 'scale_info') and current_view.scale_info:
-                    self.scale_info = current_view.scale_info
-                    self.update_scale_info_display()
-    
+            self.scale_info = getattr(self.parent_window, 'global_scale_info', None)
+        self.update_scale_info_display()
+
     def check_scale_needed(self):
         """检查所选特征是否需要比例尺信息"""
         current_feature = self.feature_combo.currentText()

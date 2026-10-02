@@ -1,8 +1,12 @@
 from PyQt5 import QtCore, QtWidgets, QtGui
+from tab_navigation import NavigableTabWidget
+from toolbar_ui import configure_chrome, StatusValueLabel, PathStatusLabel, PersistentStatusBar
 from PyQt5.QtWidgets import QMainWindow, QAction, QToolButton, QMenu, QLabel, QSlider, QDockWidget, QActionGroup
 from PyQt5.QtCore import QCoreApplication
 import PyQt5
 import os
+import sys
+from macos_paths import macos_resource_path
 # plugin_path = os.path.join(os.path.dirname(PyQt5.__file__), 'Qt', 'plugins')
 # print(f"plugin_path: {plugin_path}")
 # QCoreApplication.addLibraryPath(plugin_path)
@@ -15,7 +19,15 @@ class MainWindow(QMainWindow):
         MainWindow.resize(1200, 800)
 
         # 设置窗口图标
-        MainWindow.setWindowIcon(QtGui.QIcon(":/ICON.png"))
+        if sys.platform == "darwin":
+            window_icon = QtGui.QIcon(":/ICON.png")
+            if window_icon.isNull():
+                bundled_icon = macos_resource_path("ICON.png")
+                if bundled_icon:
+                    window_icon = QtGui.QIcon(bundled_icon)
+            MainWindow.setWindowIcon(window_icon)
+        else:
+            MainWindow.setWindowIcon(QtGui.QIcon(":/ICON.png"))
 
         # 主窗口和中央控件
         self.centralwidget = QtWidgets.QWidget(MainWindow)
@@ -26,7 +38,7 @@ class MainWindow(QMainWindow):
         self.centralLayout.setObjectName("centralLayout")
 
         # 多文档界面 (QTabWidget)
-        self.tabWidget = QtWidgets.QTabWidget(self.centralwidget)
+        self.tabWidget = NavigableTabWidget(self.centralwidget)
         self.tabWidget.setObjectName("tabWidget")
         self.tabWidget.setTabsClosable(True)
         self.tabWidget.setUsesScrollButtons(True)
@@ -74,7 +86,7 @@ class MainWindow(QMainWindow):
         MainWindow.addToolBar(QtCore.Qt.TopToolBarArea, self.toolBar)
 
         # 状态栏
-        self.statusbar = QtWidgets.QStatusBar(MainWindow)
+        self.statusbar = PersistentStatusBar(MainWindow)
         self.statusbar.setObjectName("statusbar")
         MainWindow.setStatusBar(self.statusbar)
 
@@ -83,6 +95,8 @@ class MainWindow(QMainWindow):
         # 添加菜单栏的动作
         self.actionOpen = QtWidgets.QAction(MainWindow)
         self.actionOpen.setObjectName("actionOpen")
+        self.actionOpenFolder = QtWidgets.QAction(MainWindow)
+        self.actionOpenFolder.setObjectName("actionOpenFolder")
         self.actionSavePolygonAnnotataion = QtWidgets.QAction(MainWindow)
         self.actionSavePolygonAnnotataion.setObjectName("actionSavePolygonAnnotataion")
         self.actionSaveRectangleAnnotataion = QtWidgets.QAction(MainWindow)
@@ -95,14 +109,18 @@ class MainWindow(QMainWindow):
         self.actionImportRectangleAnnotataion.setObjectName("actionImportRectangleAnnotataion")
         self.actionImportRotatedRectangleAnnotataion = QtWidgets.QAction(MainWindow)
         self.actionImportRotatedRectangleAnnotataion.setObjectName("actionImportRotatedRectangleAnnotataion")
+        self.actionSavePointAnnotataion = QtWidgets.QAction(MainWindow)
+        self.actionSavePointAnnotataion.setObjectName("actionSavePointAnnotataion")
+        self.actionImportPointAnnotataion = QtWidgets.QAction(MainWindow)
+        self.actionImportPointAnnotataion.setObjectName("actionImportPointAnnotataion")
         self.actionClose = QtWidgets.QAction(MainWindow)
         self.actionClose.setObjectName("actionClose")
         self.actionShowPoint = QtWidgets.QAction(MainWindow)
         self.actionShowPoint.setObjectName("ShowPoint")
         self.actionShowID = QtWidgets.QAction(MainWindow)
         self.actionShowID.setObjectName("ShowEdge")
-        self.actionColorSettings = QtWidgets.QAction(MainWindow)
-        self.actionColorSettings.setObjectName("ColorSettings")
+        self.actionDisplaySettings = QtWidgets.QAction(MainWindow)
+        self.actionDisplaySettings.setObjectName("DisplaySettings")
         self.actionHeatMap = QtWidgets.QAction(MainWindow)
         self.actionHeatMap.setObjectName("HeatMap")
         # self.actionUndo = QtWidgets.QAction(MainWindow)
@@ -147,6 +165,8 @@ class MainWindow(QMainWindow):
         self.actionBatchExportRectangle.setObjectName("actionBatchExportRectangle")
         self.actionBatchExportRotatedRectangle = QtWidgets.QAction(MainWindow)
         self.actionBatchExportRotatedRectangle.setObjectName("actionBatchExportRotatedRectangle")
+        self.actionBatchExportPoint = QtWidgets.QAction(MainWindow)
+        self.actionBatchExportPoint.setObjectName("actionBatchExportPoint")
         # self.actionBatchExport = QtWidgets.QAction(MainWindow)
         # self.actionBatchExport.setObjectName("actionBatchExport")
 
@@ -159,6 +179,8 @@ class MainWindow(QMainWindow):
         self.actionBatchImportRectangle.setObjectName("actionBatchImportRectangle")
         self.actionBatchImportRotatedRectangle = QtWidgets.QAction(MainWindow)
         self.actionBatchImportRotatedRectangle.setObjectName("actionBatchImportRotatedRectangle")
+        self.actionBatchImportPoint = QtWidgets.QAction(MainWindow)
+        self.actionBatchImportPoint.setObjectName("actionBatchImportPoint")
         
         # 创建 Export Feature csv 子菜单
         self.menuExportFeatureCSV = QtWidgets.QMenu("Export Feature csv", MainWindow)
@@ -176,17 +198,20 @@ class MainWindow(QMainWindow):
 
         # 将动作添加到菜单项
         self.menuFile.addAction(self.actionOpen)
+        self.menuFile.addAction(self.actionOpenFolder)
 
         # 添加保存注释子菜单及其动作
         self.menuSaveAnnotation.addAction(self.actionSavePolygonAnnotataion)
         self.menuSaveAnnotation.addAction(self.actionSaveRectangleAnnotataion)
         self.menuSaveAnnotation.addAction(self.actionSaveRotatedRectangleAnnotataion)
+        self.menuSaveAnnotation.addAction(self.actionSavePointAnnotataion)
         self.menuFile.addMenu(self.menuSaveAnnotation)
 
         # 添加导入注释子菜单及其动作
         self.menuImportAnnotation.addAction(self.actionImportPolygonAnnotataion)
         self.menuImportAnnotation.addAction(self.actionImportRectangleAnnotataion)
         self.menuImportAnnotation.addAction(self.actionImportRotatedRectangleAnnotataion)
+        self.menuImportAnnotation.addAction(self.actionImportPointAnnotataion)
         self.menuFile.addMenu(self.menuImportAnnotation)
 
         # self.menuFile.addAction(self.actionShowPoint)
@@ -195,7 +220,7 @@ class MainWindow(QMainWindow):
 
         self.menuView.addAction(self.actionShowPoint)
         self.menuView.addAction(self.actionShowID)
-        self.menuView.addAction(self.actionColorSettings)
+        self.menuView.addAction(self.actionDisplaySettings)
         self.menuView.addAction(self.actionHeatMap)
 
 
@@ -233,6 +258,7 @@ class MainWindow(QMainWindow):
         self.menuBatchExport.addAction(self.actionBatchExportPolygon)
         self.menuBatchExport.addAction(self.actionBatchExportRectangle)
         self.menuBatchExport.addAction(self.actionBatchExportRotatedRectangle)
+        self.menuBatchExport.addAction(self.actionBatchExportPoint)
         # 将子菜单添加到More菜单
         self.menuMoreInfo.addMenu(self.menuBatchExport)
 
@@ -240,6 +266,7 @@ class MainWindow(QMainWindow):
         self.menuBatchImport.addAction(self.actionBatchImportPolygon)
         self.menuBatchImport.addAction(self.actionBatchImportRectangle)
         self.menuBatchImport.addAction(self.actionBatchImportRotatedRectangle)
+        self.menuBatchImport.addAction(self.actionBatchImportPoint)
 
         self.menuMoreInfo.addMenu(self.menuBatchImport)
 
@@ -285,7 +312,8 @@ class MainWindow(QMainWindow):
         self.actionDelete.setCheckable(False)
         self.actionDelete.setEnabled(False)  # 初始设置为不可用
 
-        self.actionDeleteAllShapes = QtWidgets.QAction("Delete All Shapes", MainWindow)
+        self.actionDeleteAllShapes = QtWidgets.QAction("Clear All", MainWindow)
+        self.actionDeleteAllShapes.setToolTip("Clear all shapes")
         self.actionDeleteAllShapes.setCheckable(False)
         self.actionDeleteAllShapes.setEnabled(False)  # 初始设置为不可用
 
@@ -293,25 +321,27 @@ class MainWindow(QMainWindow):
         self.actionUndo.setCheckable(False)
         self.actionUndo.setEnabled(False)  # 初始设置为不可用
 
-        self.actionGetMER= QtWidgets.QAction("Get MER", MainWindow)
+        self.actionGetMER= QtWidgets.QAction("MER", MainWindow)
+        self.actionGetMER.setToolTip("Generate Minimum Enclosing Rectangle")
         self.actionGetMER.setCheckable(False)
         self.actionGetMER.setEnabled(False)  # 初始设置为不可用
 
-        self.actionFeatureExtraction = QtWidgets.QAction("Feature Extraction", MainWindow)
-        self.actionFeatureExtraction.setCheckable(False)
-        self.actionFeatureExtraction.setEnabled(False)
 
 
 
 
 
-        self.actionZoom = QtWidgets.QAction("Fit to View", MainWindow)
-        self.actionResetZoom = QtWidgets.QAction("Original Size", MainWindow)
+        self.actionZoom = QtWidgets.QAction("Fit", MainWindow)
+        self.actionZoom.setToolTip("Fit to View (Ctrl+Space)")
+        self.actionResetZoom = QtWidgets.QAction("1:1", MainWindow)
+        self.actionResetZoom.setToolTip("Original Size (100%)")
 
-        self.imageSizeLabel = QtWidgets.QLabel("Image Size: N/A; ")
-        self.fileSizeLabel = QtWidgets.QLabel("File Size: N/A; ")
-        self.mousePositionLabel = QtWidgets.QLabel("Mouse Position: N/A; ")
-        self.pixelValueLabel = QtWidgets.QLabel("Pixel Value: N/A")
+        self.pathLabel = PathStatusLabel("")
+        self.imageSizeLabel = StatusValueLabel("— × — px")
+        self.fileSizeLabel = StatusValueLabel("— MB")
+        self.scaleLabel = StatusValueLabel("Scale: Not set")
+        self.mousePositionLabel = StatusValueLabel("X: —  Y: —")
+        self.pixelValueLabel = StatusValueLabel("Pixel: —")
 
         # 创建 Create 子菜单动作
         self.actionCreatePolygon = QtWidgets.QAction("Create Polygon", MainWindow)
@@ -336,6 +366,7 @@ class MainWindow(QMainWindow):
 
         # 将其他动作添加到工具栏
         self.toolBar.addAction(self.actionAI)
+        self.toolBar.addSeparator()
 
         # 将 Create 工具按钮添加到工具栏
         self.toolBar.addWidget(self.createToolButton)
@@ -343,14 +374,18 @@ class MainWindow(QMainWindow):
         # 将其他动作添加到工具栏
         self.toolBar.addAction(self.actionEditShapes)
         self.toolBar.addAction(self.actionGetMER)
-        self.toolBar.addAction(self.actionFeatureExtraction)
+        self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionDuplicate)
         self.toolBar.addAction(self.actionDelete)
         
         self.toolBar.addAction(self.actionDeleteAllShapes)
+        self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionUndo)
+        self.historySeparator = self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionZoom)
+        self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionResetZoom)
+        self.toolBar.addSeparator()
 
         self.zoomSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.zoomSlider.setObjectName("zoomSlider")
@@ -362,14 +397,19 @@ class MainWindow(QMainWindow):
         self.zoomLineEdit.setFixedWidth(75)
         # self.zoomLineEdit.setValidator(QtGui.QIntValidator(10, 1000))  # 只允许输入整数
 
+        self.zoomOutButton = QtWidgets.QToolButton(MainWindow)
+        self.zoomOutButton.setToolTip("Zoom out")
+        self.zoomInButton = QtWidgets.QToolButton(MainWindow)
+        self.zoomInButton.setToolTip("Zoom in")
+        # Use the existing slider's valueChanged path for both zoom controls.
+        self.zoomOutButton.clicked.connect(lambda: self.zoomSlider.setValue(self.zoomSlider.value() - 10))
+        self.zoomInButton.clicked.connect(lambda: self.zoomSlider.setValue(self.zoomSlider.value() + 10))
+        self.zoomOutButton.setEnabled(False)
+        self.zoomInButton.setEnabled(False)
+        self.toolBar.addWidget(self.zoomOutButton)
         self.toolBar.addWidget(self.zoomSlider)
+        self.toolBar.addWidget(self.zoomInButton)
         self.toolBar.addWidget(self.zoomLineEdit)
-
-
-        self.toolBar.addWidget(self.imageSizeLabel)
-        self.toolBar.addWidget(self.fileSizeLabel)
-        self.toolBar.addWidget(self.mousePositionLabel)
-        self.toolBar.addWidget(self.pixelValueLabel)
 
         # 创建 QActionGroup 实现互斥
         self.modeActionGroup = QActionGroup(MainWindow)
@@ -395,6 +435,7 @@ class MainWindow(QMainWindow):
         # self.actionEditShapes.setEnabled(False)
 
         self.retranslateUi(MainWindow)
+        configure_chrome(self)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
     
@@ -436,23 +477,25 @@ class MainWindow(QMainWindow):
 
 
         self.actionOpen.setText(_translate("MainWindow", "Open Images"))
+        self.actionOpenFolder.setText(_translate("MainWindow", "Open Folder..."))
         self.actionSavePolygonAnnotataion.setText(_translate("MainWindow", "Save Polygon Annotation"))
         self.actionImportPolygonAnnotataion.setText(_translate("MainWindow", "Import Polygon Annotation"))
         self.actionSaveRectangleAnnotataion.setText(_translate("MainWindow", "Save Rectangle Annotation"))
         self.actionImportRectangleAnnotataion.setText(_translate("MainWindow", "Import Rectangle Annotation"))
         self.actionSaveRotatedRectangleAnnotataion.setText(_translate("MainWindow", "Save Rotated Rectangle Annotation"))
         self.actionImportRotatedRectangleAnnotataion.setText(_translate("MainWindow", "Import Rotated Rectangle Annotation"))
+        self.actionSavePointAnnotataion.setText(_translate("MainWindow", "Export Point Annotations"))
+        self.actionImportPointAnnotataion.setText(_translate("MainWindow", "Import Point Annotations"))
         self.actionShowPoint.setText(_translate("MainWindow", "All shapes are displayed as points"))
         self.actionShowID.setText(_translate("MainWindow", "hide/show shape ID"))
-        self.actionColorSettings.setText(_translate("MainWindow", "Color Settings"))
+        self.actionDisplaySettings.setText(_translate("MainWindow", "Display Settings"))
         self.actionHeatMap.setText(_translate("MainWindow", "Heat Map of polygon features"))
         self.actionClose.setText(_translate("MainWindow", "Close"))
         # self.actionUndo.setText(_translate("MainWindow", "撤销"))
         # self.actionRedo.setText(_translate("MainWindow", "重做"))
         # self.actionAdjust.setText(_translate("MainWindow", "调整"))
         # self.actionProcess.setText(_translate("MainWindow", "处理"))
-        self.actionGetMER.setText(_translate("MainWindow", "Get MER"))
-        self.actionFeatureExtraction.setText(_translate("MainWindow", "Feature Extraction"))
+        self.actionGetMER.setText(_translate("MainWindow", "MER"))
         self.actionABorAD.setText(_translate("MainWindow", "AB or AD?"))
         # self.actionShapeFilter.setText(_translate("MainWindow", "Shape Filter"))
         self.actionSetMeasuringScale.setText(_translate("MainWindow", "Set Measuring Scale"))
@@ -467,6 +510,7 @@ class MainWindow(QMainWindow):
         self.actionBatchExportPolygon.setText(_translate("MainWindow", "Batch Export Polygon annotations"))
         self.actionBatchExportRectangle.setText(_translate("MainWindow", "Batch Export Rectangle annotations"))
         self.actionBatchExportRotatedRectangle.setText(_translate("MainWindow", "Batch Export Rotated Rectangle annotations"))
+        self.actionBatchExportPoint.setText(_translate("MainWindow", "Batch Export Point Annotations"))
         
         
         self.menuExportFeatureCSV.setTitle(_translate("MainWindow", "Export Feature csv"))
@@ -479,6 +523,7 @@ class MainWindow(QMainWindow):
         self.actionBatchImportPolygon.setText(_translate("MainWindow", "Batch Import Images and Polygon annotations"))
         self.actionBatchImportRectangle.setText(_translate("MainWindow", "Batch Import Images and Rectangle annotations"))
         self.actionBatchImportRotatedRectangle.setText(_translate("MainWindow", "Batch Import Images and Rotated Rectangle annotations"))
+        self.actionBatchImportPoint.setText(_translate("MainWindow", "Batch Import Images and Point annotations"))
 
         self.actionInferenceSetting.setText(_translate("MainWindow", "Inference Setting"))
 
@@ -511,10 +556,19 @@ if __name__ == "__main__":
     from PyQt5.QtWidgets import QApplication, QMainWindow
     import sys
     app = QApplication(sys.argv)
-    app.setWindowIcon(QtGui.QIcon(":/ICON.png"))  # 设置应用程序图标
+    if sys.platform == "darwin":
+        app_icon = QtGui.QIcon(":/ICON.png")
+        if app_icon.isNull():
+            bundled_icon = macos_resource_path("ICON.png")
+            if bundled_icon:
+                app_icon = QtGui.QIcon(bundled_icon)
+        app.setWindowIcon(app_icon)
+    else:
+        app.setWindowIcon(QtGui.QIcon(":/ICON.png"))  # 设置应用程序图标
     # 设置全局字体
-    font = QtGui.QFont("微软雅黑", 10)  # 设置为“微软雅黑”字体，字号为10
-    app.setFont(font)
+    if sys.platform == "win32":
+        font = QtGui.QFont("微软雅黑", 10)  # 设置为“微软雅黑”字体，字号为10
+        app.setFont(font)
 
     GUI_Main = MainWindow()
     GUI_Main.setupUi(GUI_Main)

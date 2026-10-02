@@ -1,7 +1,135 @@
+from measurement_rows import MeasurementRows, MeasurementTable, configure_shape_selection, EXPORT_ROLE
+from shape_history import shape_identity
 # dock_widgets.py
 import numpy as np
+import csv
+from measurements import ensure_features, refresh_shapes, resolve_scale, finite_numeric
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt
+from functools import wraps
+from contextlib import contextmanager
+import weakref
+
+
+@contextmanager
+def metadata_table_update(table):
+    """Update existing items without recursive edits or intermediate sorting."""
+    blocked = table.blockSignals(True)
+    sorting = table.isSortingEnabled()
+    updates = table.updatesEnabled()
+    scroll = (table.horizontalScrollBar().value(), table.verticalScrollBar().value())
+    table.setUpdatesEnabled(False)
+    table.setSortingEnabled(False)
+    try:
+        yield
+    finally:
+        table.setSortingEnabled(sorting)
+        table.horizontalScrollBar().setValue(scroll[0])
+        table.verticalScrollBar().setValue(scroll[1])
+        table.setUpdatesEnabled(updates)
+        table.blockSignals(blocked)
+
+
+class MetadataTable(MeasurementTable):
+    def focusInEvent(self, event):
+        self._gaining_focus = True
+        try:
+            super().focusInEvent(event)
+        finally:
+            self._gaining_focus = False
+
+    def selectionCommand(self, index, event=None):
+        # Gaining focus must not toggle a row in MultiSelection mode.
+        # Qt can ask for this command with a null event during focusInEvent.
+        if getattr(self, '_gaining_focus', False):
+            return QtCore.QItemSelectionModel.NoUpdate
+        # A double click starts with a press: retain the batch selection when
+        # entering an already selected editable cell. Ctrl-click still toggles.
+        if (self.selectionMode() != QtWidgets.QAbstractItemView.ExtendedSelection
+                and event is not None and event.type() == QtCore.QEvent.MouseButtonPress
+                and event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier
+                and index.flags() & Qt.ItemIsEditable
+                and self.selectionModel().isSelected(index)):
+            return QtCore.QItemSelectionModel.NoUpdate
+        return super().selectionCommand(index, event)
+
+
+class MetadataDelegate(QtWidgets.QStyledItemDelegate):
+    """Capture real targets before sorting; commit only validated editor data."""
+    def __init__(self, dock):
+        super().__init__(dock.table_widget)
+        self.dock = dock
+
+    def createEditor(self, parent, option, index):
+        editor = QtWidgets.QLineEdit(parent)
+        editor.targets, editor.field = self.dock.edit_targets(index)
+        editor.history_epochs = [getattr(shape, '_history_epoch', 0) for shape in editor.targets]
+        if editor.field == 'classnum':
+            editor.setValidator(QtGui.QRegularExpressionValidator(
+                QtCore.QRegularExpression('[0-9]+'), editor))
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.setText(str(index.data(Qt.EditRole) or ''))
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        if (editor.hasAcceptableInput() and editor.history_epochs ==
+                [getattr(shape, '_history_epoch', 0) for shape in editor.targets]):
+            # The receiver is queued so a LabelList merge cannot delete the
+            # active editor's row during QAbstractItemView.commitData().
+            self.dock.metadataEdited.emit(editor.targets, editor.field, editor.text())
+
+    def eventFilter(self, editor, event):
+        if (event.type() == QtCore.QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and not editor.hasAcceptableInput()):
+            QtWidgets.QToolTip.showText(editor.mapToGlobal(editor.rect().bottomLeft()),
+                                       'Classnum must be a non-negative integer.', editor)
+            return True
+        return super().eventFilter(editor, event)
+
+
+def write_measurement_table(table, path, parent):
+    from io import StringIO
+    from safe_io import write_text_atomic
+    view = parent.get_current_graphics_view() if hasattr(parent, 'get_current_graphics_view') else None
+    scale = resolve_scale(parent, view) or {}
+    metadata = [scale.get('unit', 'pixel'), scale.get('scale', 1.), 'pixel']
+    with StringIO(newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow([table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+                        + (['Density Unit', 'Image Area Unit'] if table.property('density_unit') else [])
+                        + ['Measurement Unit', 'Scale (unit/pixel)', 'Coordinate Unit'])
+        for row in range(table.rowCount()):
+            writer.writerow([(table.item(row, c).data(EXPORT_ROLE)
+                              if table.item(row, c).data(EXPORT_ROLE) is not None
+                              else table.item(row, c).text()) if table.item(row, c) else ''
+                             for c in range(table.columnCount())]
+                            + ([table.property('density_unit'), table.property('image_area_unit')]
+                               if table.property('density_unit') else []) + metadata)
+        write_text_atomic(path, file.getvalue())
+
+
+def stable_table_rows(*attributes):
+    """Suspend sorting for a whole write, preserving the user's sort settings."""
+    def decorate(method):
+        @wraps(method)
+        def wrapped(self, *args, **kwargs):
+            tables = [getattr(self, name) for name in attributes] if attributes else [args[0]]
+            states = [(table, table.isSortingEnabled(),
+                       table.horizontalHeader().sortIndicatorSection(),
+                       table.horizontalHeader().sortIndicatorOrder()) for table in tables]
+            try:
+                for table in tables:
+                    table.setSortingEnabled(False)
+                return method(self, *args, **kwargs)
+            finally:
+                for table, enabled, column, order in states:
+                    table.horizontalHeader().setSortIndicator(column, order)
+                    table.setSortingEnabled(enabled)
+        return wrapped
+    return decorate
 
 # 在文件开头添加这个类定义
 # 修改NumericTableWidgetItem的实现
@@ -21,6 +149,8 @@ class NumericTableWidgetItem(QtWidgets.QTableWidgetItem):
 
 # 定义 ShapeListDock 类，继承自 QDockWidget。
 class ShapeListDock(QtWidgets.QDockWidget):
+    pointClassChanged = QtCore.pyqtSignal(object, object)
+    metadataEdited = QtCore.pyqtSignal(list, str, str)
     # 添加两个信号，用于通知可见性和选择状态的改变
     # 定义一个信号，用于通知可见性改变
     visibilityChanged = QtCore.pyqtSignal() 
@@ -30,7 +160,7 @@ class ShapeListDock(QtWidgets.QDockWidget):
     def __init__(self, parent=None):
         super().__init__("ShapeList", parent)
         # 创建一个 QTableWidget，设置列数为 4，并设置列标题。
-        self.table_widget = QtWidgets.QTableWidget()
+        self.table_widget = MetadataTable()
         self.table_widget.setColumnCount(5)
         self.table_widget.setHorizontalHeaderLabels(['Visibility', 'Label', 'Group ID', 'Classnum',"shape_type"])
         # 设置最后一列自动拉伸
@@ -47,104 +177,215 @@ class ShapeListDock(QtWidgets.QDockWidget):
        
 
           # 设置选择模式为多选
-        self.table_widget.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-        self.table_widget.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        configure_shape_selection(self.table_widget)
+        self.table_widget.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked |
+                                          QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.table_widget.setItemDelegate(MetadataDelegate(self))
+        self.table_widget.setToolTip('Click selects one row; Ctrl-click toggles; Shift-click selects a range. Double-click to edit one shape; F2 edits selected shapes. Enter confirms; Esc cancels.')
             
         self.table_widget.itemSelectionChanged.connect(self.on_shapelist_item_selected)
+        self.table_widget.selectionSettled.connect(self.on_shapelist_item_selected)
+        self.table_widget.itemChanged.connect(self.on_metadata_changed)
+        self.table_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_widget.customContextMenuRequested.connect(self.create_context_menu)
         # self.table_widget.itemChanged.connect(self.on_item_changed)  # 连接 itemChanged 信号
 
     
+    def create_context_menu(self, position):
+        menu = QtWidgets.QMenu(self)
+        actions = {menu.addAction(name): callback for name, callback in (
+            ('Select All', self.table_widget.selectAll),
+            ('Delete Selected', self.parent().delete_selected_shape),
+            ('Export Annotation', self.export_selected_annotation))}
+        action = menu.exec_(self.table_widget.viewport().mapToGlobal(position))
+        if action in actions:
+            actions[action]()
+
+    def export_selected_annotation(self):
+        from selected_annotations import serialize_selected
+        from safe_io import write_text_atomic
+        from measurements import measurement_key
+        parent = self.parent()
+        view = parent.get_current_graphics_view()
+        if not view or not view.canvas:
+            return
+        canvas = view.canvas
+        shapes = [self.table_widget.item(index.row(), 1).data(Qt.UserRole)
+                  for index in self.table_widget.selectionModel().selectedRows()]
+        try:
+            kind, data = serialize_selected(canvas, shapes)
+            snapshots = [measurement_key(shape, None) for shape in shapes]
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, 'Export selected ' + kind + ' annotations', '', 'Annotations (*.txt)')
+            if not path:
+                return
+            if (parent.get_current_graphics_view() is not view or
+                    snapshots != [measurement_key(shape, None) for shape in shapes] or
+                    any(not any(item is shape for item in canvas.shapes) for shape in shapes)):
+                raise ValueError('Selection or annotations changed during export. Please retry.')
+            write_text_atomic(path, data)
+        except Exception as error:
+            QtWidgets.QMessageBox.warning(parent, 'Annotation export', str(error))
+
     def clearSelection(self):
         self.table_widget.clearSelection()
 
     def findItemByShape(self, shape):
-        for row in range(self.table_widget.rowCount()):
-            item = self.table_widget.item(row, 1)  # 假设第1列是 Label
-            if item and id(item.data(QtCore.Qt.UserRole)) == id(shape):
-                return row
-        # 返回-1表示未找到，而不是抛出异常
-        return -1
-    
+        item = getattr(self, '_items_by_id', {}).get(shape_identity(shape))
+        return item.row() if item is not None else -1
+
     def selectItem(self, row):
-        selection_model = self.table_widget.selectionModel()
-        selection_model.clearSelection()  # 清除之前的选择
-        index = self.table_widget.model().index(row, 0)  # 假设第0列存在
-        selection_model.select(index, QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+        self.selectItems([row])
     
-    def selectItems(self, rows):
-        selection_model = self.table_widget.selectionModel()
-        selection_model.clearSelection()  # 清除之前的选择
+    def selectItems(self, rows, reset_anchor=True, primary_item=None):
+        table = self.table_widget
+        selection_model = table.selectionModel()
+        selection = QtCore.QItemSelection()
+        primary = None
         for row in rows:
-            index = self.table_widget.model().index(row, 0)
-            selection_model.select(index, QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+            if 0 <= row < table.rowCount():
+                primary = table.item(row, 1)
+                index = table.model().index(row, 1)
+                selection.select(index, index)
+        table.set_selection_primary(primary_item if primary_item is not None else primary, reset_anchor)
+        selection_model.select(selection, QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
+
+    def primary_shape(self):
+        table = self.table_widget
+        item = table.item(table.currentRow(), 1)
+        return item.data(Qt.UserRole) if item is not None else None
+
+    def select_shapes(self, shapes, primary=None, scroll=False):
+        table = self.table_widget
+        blocker = QtCore.QSignalBlocker(table)
+        item = getattr(self, '_items_by_id', {}).get(shape_identity(primary)) if primary is not None else None
+        self.selectItems([self.findItemByShape(s) for s in shapes], reset_anchor=scroll, primary_item=item)
+        if item is not None and scroll:
+            table.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtTop)
+        del blocker
     
     def scrollToItem(self, row):
-        item = self.table_widget.item(row, 1)  # 假设第1列是 Label
-        if item:
-            self.table_widget.verticalScrollBar().setSliderPosition(row)
-            self.table_widget.setFocus()
-            # 处理事件以刷新界面
-            QtWidgets.QApplication.processEvents()
+        item = self.table_widget.item(row, 1)
+        if item is not None:
+            self.table_widget.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtTop)
 
-
-
-
-
-# 填充表格数据
     def populate(self, shapes):
-        self.table_widget.setSortingEnabled(False)  
-
         self.shapes = shapes
-        self.table_widget.setRowCount(0)  # 清空现有内容
+        self._items_by_id = {}
+        self._row_states = {}
+        with metadata_table_update(self.table_widget):
+            self.table_widget.setRowCount(0)
+            self.table_widget.setRowCount(len(shapes))
+            for row, shape in enumerate(shapes):
+                self._append_row(shape, row)
 
-        for shape in shapes:
-            row_position = self.table_widget.rowCount()
-            self.table_widget.insertRow(row_position)
+    @staticmethod
+    def _row_state(shape):
+        return (shape.label or '', shape.group_id, shape.classnum, shape.shape_type, shape.visible)
 
-            # 创建复选框
-            checkbox = QtWidgets.QCheckBox()
-            checkbox.setChecked(shape.visible)
-            # 使用 lambda 捕获当前的 shape
-            checkbox.stateChanged.connect(lambda state, s=shape: self.on_visibility_changed(state, s))
-            self.table_widget.setCellWidget(row_position, 0, checkbox)
+    def _append_row(self, shape, row=None):
+        table = self.table_widget
+        if row is None:
+            row = table.rowCount()
+            table.setRowCount(row + 1)
+        if not hasattr(self, '_items_by_id'):
+            self._items_by_id, self._row_states = {}, {}
+        checkbox = QtWidgets.QCheckBox()
+        checkbox.setChecked(shape.visible)
+        checkbox.stateChanged.connect(lambda state, ref=weakref.ref(shape):
+                                      self.on_visibility_changed(state, ref()) if ref() is not None else None)
+        table.setCellWidget(row, 0, checkbox)
+        values = self._row_state(shape)[:4]
+        color = shape.get_color_by_classnum(shape.classnum)
+        for column, value in enumerate(values, 1):
+            cls = NumericTableWidgetItem if column in (2, 3) else QtWidgets.QTableWidgetItem
+            item = cls(str(value))
+            item.setData(Qt.UserRole, shape)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setForeground(color)
+            flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            if column in (1, 3):
+                flags |= Qt.ItemIsEditable
+            item.setFlags(flags)
+            table.setItem(row, column, item)
+            if column == 1:
+                self._items_by_id[shape_identity(shape)] = item
+        self._row_states[shape_identity(shape)] = self._row_state(shape)
 
-            # 创建表格项
-            label_item = QtWidgets.QTableWidgetItem(shape.label)
-            
-            # 使用NumericTableWidgetItem处理数值列
-            group_id_item = NumericTableWidgetItem(str(shape.group_id))
-            group_id_item.setData(QtCore.Qt.UserRole, float(shape.group_id) if isinstance(shape.group_id, (int, float)) else 0)
-            
-            classnum_item = NumericTableWidgetItem(str(shape.classnum))
-            classnum_item.setData(QtCore.Qt.UserRole, float(shape.classnum) if isinstance(shape.classnum, (int, float)) else 0)
-            
-            shape_type_item = QtWidgets.QTableWidgetItem(str(shape.shape_type))
+    def sync_shapes(self, shapes):
+        """Keep existing items/selection on local edits; rebuild once for replaced objects."""
+        desired = {shape_identity(s): s for s in shapes}
+        existing = getattr(self, '_items_by_id', {})
+        removed = set(existing) - set(desired)
+        added = [s for s in shapes if shape_identity(s) not in existing]
+        if not existing or len(removed) > len(existing) // 2:
+            self.populate(shapes)
+            return
+        table = self.table_widget
+        self.shapes = shapes
+        if removed or added:
+            with metadata_table_update(table):
+                for row, identity in sorted(((existing[i].row(), i) for i in removed), reverse=True):
+                    table.removeRow(row)
+                    del existing[identity]
+                    self._row_states.pop(identity, None)
+                start = table.rowCount()
+                table.setRowCount(start + len(added))
+                for row, shape in enumerate(added, start):
+                    self._append_row(shape, row)
+        changed = [s for s in shapes if self._row_states.get(shape_identity(s)) != self._row_state(s)]
+        if changed:
+            self.update_metadata(changed)
 
-            # 设置文本对齐方式
-            label_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            group_id_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            classnum_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            shape_type_item.setTextAlignment(QtCore.Qt.AlignCenter)
+    def edit_targets(self, index):
+        shape = index.data(Qt.UserRole)
+        selected = [self.table_widget.item(i.row(), 1).data(Qt.UserRole)
+                    for i in self.table_widget.selectionModel().selectedRows()]
+        targets = selected if any(s is shape for s in selected) else [shape]
+        return targets, 'label' if index.column() == 1 else 'classnum'
 
-            # 设置文本颜色
-            color = shape.get_color_by_classnum(shape.classnum)
-            label_item.setForeground(color)
-            group_id_item.setForeground(color)
-            classnum_item.setForeground(color)
-            shape_type_item.setForeground(color)
+    def on_metadata_changed(self, item):
+        if item.column() not in (1, 3):
+            return
+        shape = item.data(Qt.UserRole)
+        if shape is None:
+            return
+        field = 'label' if item.column() == 1 else 'classnum'
+        old = (shape.label or '') if field == 'label' else str(shape.classnum)
+        text = item.text()
+        if text == old:
+            return
+        targets, _ = self.edit_targets(self.table_widget.indexFromItem(item))
+        blocker = QtCore.QSignalBlocker(self.table_widget)
+        item.setText(old)
+        del blocker
+        if field == 'classnum':
+            from point_annotations import class_id
+            try:
+                class_id(text)
+            except ValueError as error:
+                QtWidgets.QMessageBox.warning(self, 'Invalid class ID', str(error))
+                return
+        self.metadataEdited.emit(targets, field, text)
 
-            # 将 shape 存储在表格项中
-            for item in [label_item, group_id_item, classnum_item, shape_type_item]:
-                item.setData(QtCore.Qt.UserRole, shape)
-                item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled)
-
-            # 添加到表格中
-            self.table_widget.setItem(row_position, 1, label_item)
-            self.table_widget.setItem(row_position, 2, group_id_item)
-            self.table_widget.setItem(row_position, 3, classnum_item)
-            self.table_widget.setItem(row_position, 4, shape_type_item)
-
-        self.table_widget.setSortingEnabled(True)
+    def update_metadata(self, shapes):
+        table = self.table_widget
+        with metadata_table_update(table):
+            for shape in shapes:
+                row = self.findItemByShape(shape)
+                if row < 0:
+                    continue
+                state = self._row_state(shape)
+                color = shape.get_color_by_classnum(shape.classnum)
+                for column, value in enumerate(state[:4], 1):
+                    item = table.item(row, column)
+                    if item.text() != str(value):
+                        item.setText(str(value))
+                    item.setForeground(color)
+                checkbox = table.cellWidget(row, 0)
+                blocker = QtCore.QSignalBlocker(checkbox)
+                checkbox.setChecked(shape.visible)
+                del blocker
+                self._row_states[shape_identity(shape)] = state
 
     # def on_item_changed(self, item):
     #     if item.column() == 1:  # Label 列
@@ -156,7 +397,17 @@ class ShapeListDock(QtWidgets.QDockWidget):
 # 当勾选可见性一列时，
 # 更新形状的可见性状态。发射 visibilityChanged 信号。
     def on_visibility_changed(self, state, shape):
-        shape.visible = (state == QtCore.Qt.Checked)
+        visible = state == QtCore.Qt.Checked
+        if shape.visible == visible:
+            return
+        parent = self.parent()
+        view = parent.get_current_graphics_view() if parent is not None else None
+        canvas = view.canvas if view is not None else None
+        if canvas is None or not any(item is shape for item in canvas.shapes):
+            return
+        canvas.save_state()
+        shape.visible = visible
+        canvas.shapesChanged.emit()
         self.visibilityChanged.emit()
 
 # 当选择的行发生变化时， 更新形状的选中状态。获取所有选中的行。
@@ -173,7 +424,10 @@ class ShapeListDock(QtWidgets.QDockWidget):
     # 重写 on_shapelist_item_selected 方法
     def on_shapelist_item_selected(self):
         parent = self.parent()
-        if parent._noCanvasSelectionSlot:
+        if (self.table_widget._selection_interacting
+                or getattr(parent, '_syncing_shape_selection', False)):
+            return
+        if getattr(parent, '_noCanvasSelectionSlot', False):
             pass
         else:
             selected_rows = self.table_widget.selectionModel().selectedRows()
@@ -192,201 +446,161 @@ class ShapeListDock(QtWidgets.QDockWidget):
 
     
     def update_visibility(self):
-        for row, shape in enumerate(self.shapes):
+        for row in range(self.table_widget.rowCount()):
+            shape = self.table_widget.item(row, 1).data(Qt.UserRole)
             checkbox = self.table_widget.cellWidget(row, 0)
             if checkbox:
-                checkbox.blockSignals(True)
+                blocker = QtCore.QSignalBlocker(checkbox)
                 checkbox.setChecked(shape.visible)
-                checkbox.blockSignals(False)
-        self.table_widget.repaint()
+                del blocker
         self.table_widget.viewport().update()
 
     def add_shape(self, shape):
-        """向形状列表中添加新形状"""
-        # 插入新行
-        row_position = self.table_widget.rowCount()
-        self.table_widget.insertRow(row_position)
-
-        # 创建复选框
-        checkbox = QtWidgets.QCheckBox()
-        checkbox.setChecked(shape.visible)
-        checkbox.stateChanged.connect(lambda state, s=shape: self.on_visibility_changed(state, s))
-        self.table_widget.setCellWidget(row_position, 0, checkbox)
-
-        # 添加标签
-        label_item = QtWidgets.QTableWidgetItem(str(shape.label))
-        label_item.setData(QtCore.Qt.UserRole, shape)  # 存储shape对象引用
-        self.table_widget.setItem(row_position, 1, label_item)
-
-        # 添加Group ID - 使用NumericTableWidgetItem
-        group_id_item = NumericTableWidgetItem(str(shape.group_id))
-        group_id_item.setData(QtCore.Qt.UserRole, float(shape.group_id) if isinstance(shape.group_id, (int, float)) else 0)
-        group_id_item.setData(QtCore.Qt.UserRole+1, shape)  # 继续存储shape对象引用
-        self.table_widget.setItem(row_position, 2, group_id_item)
-
-        # 添加Classnum - 使用NumericTableWidgetItem
-        classnum_item = NumericTableWidgetItem(str(shape.classnum))
-        classnum_item.setData(QtCore.Qt.UserRole, float(shape.classnum) if isinstance(shape.classnum, (int, float)) else 0)
-        classnum_item.setData(QtCore.Qt.UserRole+1, shape)  # 继续存储shape对象引用
-        self.table_widget.setItem(row_position, 3, classnum_item)
-
-        # 添加shape_type
-        shape_type_item = QtWidgets.QTableWidgetItem(str(shape.shape_type))
-        shape_type_item.setData(QtCore.Qt.UserRole, shape)  # 存储shape对象引用
-        self.table_widget.setItem(row_position, 4, shape_type_item)
-
-        # 更新shapes列表
-        if shape not in self.shapes:
+        with metadata_table_update(self.table_widget):
+            self._append_row(shape)
+        if not any(s is shape for s in self.shapes):
             self.shapes.append(shape)
 
 
-        
-# 定义 LabelListDock 类，继承自 QDockWidget。
 class LabelListDock(QtWidgets.QDockWidget):
-    visibilityChanged = QtCore.pyqtSignal(str, bool)  # 传递标签和可见性状态
+    visibilityChanged = QtCore.pyqtSignal(str, bool)
+    metadataEdited = QtCore.pyqtSignal(list, str, str)
 
     def __init__(self, parent=None):
-        super().__init__("LabelList", parent)
-
-        self.table_widget = QtWidgets.QTableWidget()
+        super().__init__('LabelList', parent)
+        self.table_widget = MetadataTable()
         self.table_widget.setColumnCount(2)
         self.table_widget.setHorizontalHeaderLabels(['Visible', 'Label'])
         self.table_widget.horizontalHeader().setStretchLastSection(True)
         self.table_widget.setSortingEnabled(True)
+        self.table_widget.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked |
+                                          QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.table_widget.setItemDelegate(MetadataDelegate(self))
+        self.table_widget.itemChanged.connect(self.on_label_changed)
+        self.table_widget.setToolTip('Double-click a label to rename it for all shapes in the current image.')
         self.setWidget(self.table_widget)
         self.labels = []
-        # 存储标签与对应的复选框
-        self.checkbox_dict = {}  # 初始化为实例变量
+        self.shapes = []
+        self.checkbox_dict = {}
 
-# 填充表格数据
-# 填充表格数据
-    # def populate(self, shapes, get_color_func):
-    #     self.labels.clear()
-    #     self.table_widget.setRowCount(0)
-    #     # 使用字典存储标签的选中状态，而不是 QCheckBox 实例
-    #     # self.checkbox_dict.clear()  # 保留现有的选中状态
+    def edit_targets(self, index):
+        label = index.data(Qt.UserRole)
+        return [s for s in self.shapes if s.label == label], 'label'
 
-    #     label_set = set(shape.label for shape in shapes)
-    #     label_set = {label for label in label_set if label is not None}
-    #     for row, label in enumerate(sorted(label_set)):
-    #         self.table_widget.insertRow(row)
+    def on_label_changed(self, item):
+        if item.column() != 1 or item.text() == item.data(Qt.UserRole):
+            return
+        targets, field = self.edit_targets(self.table_widget.indexFromItem(item))
+        text = item.text()
+        blocker = QtCore.QSignalBlocker(self.table_widget)
+        item.setText(item.data(Qt.UserRole) or '')
+        del blocker
+        self.metadataEdited.emit(targets, field, text)
 
-    #         # 创建复选框
-    #         checkbox = QtWidgets.QCheckBox()
-    #         # 设置复选框状态，如果之前有记录则使用记录的状态，否则默认选中
-    #         checked = self.checkbox_dict.get(label, True)
-    #         if isinstance(checked, QtWidgets.QCheckBox):
-    #         # 如果不小心存储了 QCheckBox，重置为默认值
-    #             checked = True
-    #         checkbox.setChecked(checked)
-    #         # 连接信号以更新 checkbox_dict 中的状态
-    #         checkbox.stateChanged.connect(lambda state, l=label: self.on_visibility_changed(state, l))
-    #         self.table_widget.setCellWidget(row, 0, checkbox)
+    def _append_label(self, label):
+        row = self.table_widget.rowCount()
+        self.table_widget.insertRow(row)
+        item = QtWidgets.QTableWidgetItem(label)
+        item.setData(Qt.UserRole, label)
+        self.table_widget.setItem(row, 1, item)
+        checkbox = QtWidgets.QCheckBox()
+        checkbox.setProperty('label', label)
+        checkbox.setChecked(True)
+        checkbox.stateChanged.connect(
+            lambda state, box=checkbox: self.on_visibility_changed(state, box.property('label')))
+        self.table_widget.setCellWidget(row, 0, checkbox)
+        return item
 
-    #         # 更新 checkbox_dict 中的选中状态
-    #         self.checkbox_dict[label] = checkbox.isChecked()
     def populate(self, shapes, get_color_func):
-        self.labels.clear()
-        self.table_widget.setRowCount(0)
-        # 使用字典存储标签的选中状态，而不是 QCheckBox 实例
-        # self.checkbox_dict.clear()  # 保留现有的选中状态
+        with metadata_table_update(self.table_widget):
+            self.table_widget.setRowCount(0)
+            self.checkbox_dict.clear()
+        self.sync_labels(shapes, get_color_func)
 
-        # 计算每个标签的可见状态
-        label_visibility = {}
+    def sync_labels(self, shapes, get_color_func, renames=None):
+        """Reconcile label rows, keeping unchanged items and checkbox connections."""
+        self.shapes = shapes
+        groups = {}
         for shape in shapes:
             if shape.label is not None:
-                # 如果标签首次出现，初始化为该形状的可见性
-                if shape.label not in label_visibility:
-                    label_visibility[shape.label] = shape.visible
-                # 如果任何形状可见，则该标签为可见
-                elif shape.visible:
-                    label_visibility[shape.label] = True
+                group = groups.setdefault(shape.label, [shape.classnum, False])
+                group[1] = group[1] or shape.visible
+        table = self.table_widget
+        renames = renames or {}
+        selected = {renames.get(index.data(Qt.UserRole), index.data(Qt.UserRole))
+                    for index in table.selectionModel().selectedIndexes() if index.column() == 1}
+        with metadata_table_update(table):
+            items = {table.item(row, 1).data(Qt.UserRole): table.item(row, 1)
+                     for row in range(table.rowCount())}
+            for old, new in renames.items():
+                if old in items and old not in groups and new in groups and new not in items:
+                    item = items.pop(old)
+                    item.setData(Qt.UserRole, new)
+                    item.setText(new)
+                    table.cellWidget(item.row(), 0).setProperty('label', new)
+                    items[new] = item
+            for label, item in list(items.items()):
+                if label not in groups:
+                    table.removeRow(item.row())
+                    del items[label]
+            for label in sorted(groups):
+                category, visible = groups[label]
+                item = items.get(label)
+                if item is None:
+                    item = self._append_label(label)
+                item.setForeground(get_color_func(category))
+                checkbox = table.cellWidget(item.row(), 0)
+                blocker = QtCore.QSignalBlocker(checkbox)
+                checkbox.setChecked(visible)
+                del blocker
+                item.setSelected(label in selected)
+            self.labels = list(groups)
+            self.checkbox_dict = {label: group[1] for label, group in groups.items()}
 
-        label_set = set(shape.label for shape in shapes)
-        label_set = {label for label in label_set if label is not None}
-        for row, label in enumerate(sorted(label_set)):
-            self.table_widget.insertRow(row)
-
-            # 创建复选框
-            checkbox = QtWidgets.QCheckBox()
-            
-            # 首先检查当前画布中该标签的可见性
-            if label in label_visibility:
-                # 使用该标签对应形状的可见性状态
-                checked = label_visibility[label]
-            else:
-                # 如果在当前画布中找不到该标签，则使用之前保存的状态或默认为True
-                checked = self.checkbox_dict.get(label, True)
-                if isinstance(checked, QtWidgets.QCheckBox):
-                    # 如果不小心存储了 QCheckBox，重置为默认值
-                    checked = True
-                    
-            checkbox.setChecked(checked)
-            # 连接信号以更新 checkbox_dict 中的状态
-            checkbox.stateChanged.connect(lambda state, l=label: self.on_visibility_changed(state, l))
-            self.table_widget.setCellWidget(row, 0, checkbox)
-
-            # 更新 checkbox_dict 中的选中状态
-            self.checkbox_dict[label] = checked  # 保存实际的布尔值而不是checkbox的状态
-
-            # ... 其余代码不变
-
-            # 创建标签项
-            label_item = QtWidgets.QTableWidgetItem(label)
-            label_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)  # 设置为只读
-            classnum = next((shape.classnum for shape in shapes if shape.label == label), None)
-            color = get_color_func(classnum)
-            label_item.setForeground(color)
-            self.table_widget.setItem(row, 1, label_item)
-
-# 当勾选可见性一列时，更新标签的可见性状态。发射 visibilityChanged 信号。
-# 在 LabelListDock 类中
     def on_visibility_changed(self, state, label):
-        visible = (state == QtCore.Qt.Checked)
+        visible = state == Qt.Checked
+        self.checkbox_dict[label] = visible
         self.visibilityChanged.emit(label, visible)
 
     def add_label(self, label):
-        """添加新标签到标签列表"""
-        # 检查标签是否已存在
-        for row in range(self.table_widget.rowCount()):
-            if self.table_widget.item(row, 1).text() == label:
-                return
-
-        # 插入新行
-        row = self.table_widget.rowCount()
-        self.table_widget.insertRow(row)
-
-        # 创建复选框
-        checkbox = QtWidgets.QCheckBox()
-        checkbox.setChecked(True)  # 默认可见
-        checkbox.stateChanged.connect(lambda state, l=label: self.on_visibility_changed(state, l))
-        self.table_widget.setCellWidget(row, 0, checkbox)
-        self.checkbox_dict[label] = checkbox
-
-        # 创建标签项
-        label_item = QtWidgets.QTableWidgetItem(label)
-        self.table_widget.setItem(row, 1, label_item)
-
-            
-        # 更新标签列表
-        if label not in self.labels:
-            self.labels.append(label)
+        if label is None:
+            return
+        parent = self.parent()
+        if hasattr(parent, 'get_current_shapes'):
+            self.shapes = parent.get_current_shapes()
+        with metadata_table_update(self.table_widget):
+            item = next((self.table_widget.item(row, 1)
+                         for row in range(self.table_widget.rowCount())
+                         if self.table_widget.item(row, 1).data(Qt.UserRole) == label), None)
+            created = item is None
+            if created:
+                item = self._append_label(label)
+                self.labels.append(label)
+                self.checkbox_dict[label] = True
+            shape = next((s for s in reversed(self.shapes) if s.label == label), None)
+            if shape is not None:
+                if created:
+                    item.setForeground(shape.get_color_by_classnum(shape.classnum))
+                checkbox = self.table_widget.cellWidget(item.row(), 0)
+                blocker = QtCore.QSignalBlocker(checkbox)
+                checkbox.setChecked(shape.visible if created else checkbox.isChecked() or shape.visible)
+                self.checkbox_dict[label] = checkbox.isChecked()
+                del blocker
 
 
-
-
-class MeasuredResultsDock(QtWidgets.QDockWidget):
+class MeasuredResultsDock(MeasurementRows, QtWidgets.QDockWidget):
+    shapeSelectionChanged = QtCore.pyqtSignal(list)
     def __init__(self, parent=None):
         super().__init__("MeasuredResults(Shapes)", parent)
         self.tab_widget = QtWidgets.QTabWidget()
         self.setWidget(self.tab_widget)
 
         # 创建用于不同形状的 QTableWidget
-        self.polygon_table = QtWidgets.QTableWidget()
-        self.rotated_rectangle_table = QtWidgets.QTableWidget()
-        self.rectangle_table = QtWidgets.QTableWidget()
-        self.line_table = QtWidgets.QTableWidget()
-        self.point_table = QtWidgets.QTableWidget()
+        self.polygon_table = MeasurementTable()
+        self.rotated_rectangle_table = MeasurementTable()
+        self.rectangle_table = MeasurementTable()
+        self.line_table = MeasurementTable()
+        self.point_table = MeasurementTable()
 
         # 将表格添加到选项卡
         self.tab_widget.addTab(self.polygon_table, "Polygon")
@@ -401,22 +615,27 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
         self.setup_table(self.rectangle_table)
         self.setup_table(self.line_table)
         self.setup_table(self.point_table)
+        self._init_measurement_rows()
         #         # 初始化排序状态字典
         # self.sort_order = {}
 
     def setup_table(self, table):
         table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)  # 支持多选
+        configure_shape_selection(table)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         # Add context menu
         table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(lambda pos: self.create_context_menu(table, pos))
         # Add shortcut Ctrl+A
         select_all_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+A"), table)
-        select_all_shortcut.activated.connect(lambda: self.toggle_select_all(table))
+        select_all_shortcut.setContext(Qt.WidgetShortcut)
+        select_all_shortcut.activated.connect(table.selectAll)
         # Add copy action
         copy_action = QtWidgets.QAction("Copy", table)
+        copy_action.setShortcut(QtGui.QKeySequence.Copy)
+        copy_action.setShortcutContext(Qt.WidgetShortcut)
+        copy_action.setToolTip('Copy (Ctrl+C)')
         copy_action.triggered.connect(lambda: self.copy_selected_rows(table))
         table.addAction(copy_action)
         # 启用内置排序功能
@@ -465,51 +684,35 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
 #                 table.setItem(row_position, col, QtWidgets.QTableWidgetItem(data))
 
     def create_context_menu(self, table, position):
-        menu = QtWidgets.QMenu()
-        copy_action = menu.addAction("Copy")
-        delete_action = menu.addAction("Delete")
-        select_all_action = menu.addAction("Select All")
-        save_as_action = menu.addAction("Save As")
+        menu = QtWidgets.QMenu(self)
+        actions = {menu.addAction(name): callback for name, callback in (
+            ('Select All', table.selectAll),
+            ('Copy', lambda: self.copy_selected_rows(table)),
+            ('Export CSV', lambda: self.save_table_as(table)))}
         action = menu.exec_(table.viewport().mapToGlobal(position))
-        if action == copy_action:
-            self.copy_selected_rows(table)
-        elif action == delete_action:
-            self.delete_selected_rows(table)
-        elif action == select_all_action:
-            self.toggle_select_all(table)
-        elif action == save_as_action:
-            self.save_table_as(table)
+        if action in actions:
+            actions[action]()
 
     def copy_selected_rows(self, table):
-        if isinstance(table, QtWidgets.QTableWidget):
-            selected_rows = sorted(set(index.row() for index in table.selectedIndexes()))
-            if selected_rows:
-                data = []
-                headers = [table.horizontalHeaderItem(col).text() for col in range(table.columnCount())]
-                data.append('\t'.join(headers))  # 添加表头
-                for row in selected_rows:
-                    row_data = []
-                    for column in range(table.columnCount()):
-                        item = table.item(row, column)
-                        if item:
-                            row_data.append(item.text())
-                        else:
-                            row_data.append('')
-                    data.append('\t'.join(row_data))
-                clipboard = QtWidgets.QApplication.clipboard()
-                clipboard.setText('\n'.join(data))
-        else:
-            print("Selected widget is not a QTableWidget.--- by copy_selected_rows method")
+        from io import StringIO
+        rows = sorted({index.row() for index in table.selectedIndexes()})
+        if not rows:
+            return
+        stream = StringIO(newline='')
+        writer = csv.writer(stream, delimiter='\t', lineterminator='\r\n')
+        writer.writerow([table.horizontalHeaderItem(c).text() for c in range(table.columnCount())])
+        for row in rows:
+            values = []
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                raw = item.data(EXPORT_ROLE) if item else None
+                values.append(raw if raw is not None else item.text() if item else '')
+            writer.writerow(values)
+        QtWidgets.QApplication.clipboard().setText(stream.getvalue())
 
-
-        
     def delete_selected_rows(self, table):
-        if isinstance(table, QtWidgets.QTableWidget):
-            selected_rows = sorted(set(index.row() for index in table.selectedIndexes()), reverse=True)
-            for row in selected_rows:
-                table.removeRow(row)
-        else:
-            print("Selected widget is not a QTableWidget. --- by delete_selected_rows method")
+        # Derived results cannot delete annotations or statistical rows.
+        return
 
     def toggle_select_all(self, table):
         if isinstance(table, QtWidgets.QTableWidget):
@@ -521,6 +724,12 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
             print("Selected widget is not a QTableWidget.--- by toggle_select_all method")
 
     def save_table_as(self, table):
+        parent = self.parent()
+        if hasattr(parent, 'measurements_ready_for_export'):
+            if not parent.measurements_ready_for_export():
+                return
+        elif hasattr(parent, 'refresh_measurements'):
+            parent.refresh_measurements(force=True)
         if isinstance(table, QtWidgets.QTableWidget):
             # 获取当前图片名称、QDockWidget名称和QtWidgets名称
             # current_image_name = self.get_current_image_name()  # 需要实现此方法
@@ -535,68 +744,25 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
                 "CSV Files (*.csv);;All Files (*)"
             )
             if path:
-                with open(path, 'w', encoding='utf-8') as file:
-                    # 写入表头
-                    headers = [table.horizontalHeaderItem(col).text() for col in range(table.columnCount())]
-                    file.write(','.join(headers) + '\n')
-                    for row in range(table.rowCount()):
-                        row_data = []
-                        for column in range(table.columnCount()):
-                            item = table.item(row, column)
-                            if item:
-                                row_data.append(item.text())
-                            else:
-                                row_data.append('')
-                        file.write(','.join(row_data) + '\n')
+                try:
+                    write_measurement_table(table, path, parent)
+                except (OSError, ValueError) as error:
+                    QtWidgets.QMessageBox.warning(parent, 'Save failed', str(error))
         else:
             print("Selected widget is not a QTableWidget.---by save_table_as method")
 
-    def populate(self, shapes):
-        # 清空所有表格
-        self.clear_tables()
-        self.polygon_table.setSortingEnabled(False)
-        self.rotated_rectangle_table.setSortingEnabled(False)
-        self.rectangle_table.setSortingEnabled(False)
-        self.line_table.setSortingEnabled(False)
-        self.point_table.setSortingEnabled(False)
-        # 按形状类型分类
-        shape_groups = {
-            'polygon': [],
-            'rotated_rectangle': [],
-            'rectangle': [],
-            'line': [],
-            'point': [],
-        }
-
+    def _populate_result_rows(self, table, shapes):
+        wanted = {shape_identity(shape) for shape in shapes}
+        for uid, (kind, cells) in list(self._rows.items()):
+            if getattr(self, kind + '_table') is table and uid not in wanted:
+                self.remove_result(uid)
         for shape in shapes:
-            if hasattr(shape, 'feature_results'):
-                shape_type = shape.shape_type
-                if shape_type in shape_groups:
-                    shape_groups[shape_type].append(shape)
+            self.update_result(shape)
 
-        # 分别填充不同的表格
-        self.populate_polygon_table(shape_groups['polygon'])
-        self.populate_rotated_rectangle_table(shape_groups['rotated_rectangle'])
-        self.populate_rectangle_table(shape_groups['rectangle'])
-        self.populate_line_table(shape_groups['line'])
-        self.populate_point_table(shape_groups['point'])
-
-        
-        self.polygon_table.setSortingEnabled(True)
-        self.rotated_rectangle_table.setSortingEnabled(True)
-        self.rectangle_table.setSortingEnabled(True)
-        self.line_table.setSortingEnabled(True)
-        self.point_table.setSortingEnabled(True)
-
-    def clear_tables(self):
-        self.polygon_table.setRowCount(0)
-        self.rotated_rectangle_table.setRowCount(0)
-        self.rectangle_table.setRowCount(0)
-        self.line_table.setRowCount(0)
-        self.point_table.setRowCount(0)
-
+    @stable_table_rows('polygon_table')
     def populate_polygon_table(self, shapes):
         if not shapes:
+            self._populate_result_rows(self.polygon_table, [])
             return
 
         # 假设所有形状单位相同，取第一个
@@ -620,26 +786,13 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
         self.polygon_table.setColumnCount(len(headers))
         self.polygon_table.setHorizontalHeaderLabels(headers)
 
-        for shape in shapes:
-            results = shape.feature_results
-            if not isinstance(results, dict):
-                print(f"警告: feature_results 不是字典类型: {results}")
-                continue
+        self._populate_result_rows(self.polygon_table, shapes)
 
-            row_position = self.polygon_table.rowCount()
-            self.polygon_table.insertRow(row_position)
-            for col_index, key in enumerate(results.keys()):
-                value = results.get(key, '')
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                if isinstance(value, (int, float)):
-                    item = NumericTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                    item.setData(QtCore.Qt.UserRole, float(value))  # 存储实际数值
-                else:
-                    item = QtWidgets.QTableWidgetItem(str(value))
-                self.polygon_table.setItem(row_position, col_index, item)
 
+    @stable_table_rows('rotated_rectangle_table')
     def populate_rotated_rectangle_table(self, shapes):
         if not shapes:
+            self._populate_result_rows(self.rotated_rectangle_table, [])
             return
 
         unit = shapes[0].unit if hasattr(shapes[0], 'unit') else 'pixel'
@@ -657,28 +810,13 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
         self.rotated_rectangle_table.setColumnCount(len(headers))
         self.rotated_rectangle_table.setHorizontalHeaderLabels(headers)
 
-        for shape in shapes:
-            results = shape.feature_results
-            if not isinstance(results, dict):
-                print(f"警告: feature_results 不是字典类型: {results}")
-                continue
+        self._populate_result_rows(self.rotated_rectangle_table, shapes)
 
-            row_position = self.rotated_rectangle_table.rowCount()
-            self.rotated_rectangle_table.insertRow(row_position)
-            for col_index, key in enumerate(results.keys()):
-                value = results.get(key, '')
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                if isinstance(value, (int, float)):
-                    item = NumericTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                    item.setData(QtCore.Qt.UserRole, float(value))  # 存储实际数值
-                else:
-                    item = QtWidgets.QTableWidgetItem(str(value))
-                self.rotated_rectangle_table.setItem(row_position, col_index, item)
 
-    
+    @stable_table_rows('line_table')
     def populate_line_table(self, shapes):
         if not shapes:
+            self._populate_result_rows(self.line_table, [])
             return
 
         unit = shapes[0].unit if hasattr(shapes[0], 'unit') else 'pixel'
@@ -695,26 +833,13 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
         self.line_table.setColumnCount(len(headers))
         self.line_table.setHorizontalHeaderLabels(headers)
 
-        for shape in shapes:
-            results = shape.feature_results
-            if not isinstance(results, dict):
-                print(f"警告: feature_results 不是字典类型: {results}")
-                continue
-            row_position = self.line_table.rowCount()
-            self.line_table.insertRow(row_position)
-            for col_index, key in enumerate(results.keys()):
-                value = results.get(key, '')
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                if isinstance(value, (int, float)):
-                    item = NumericTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                    item.setData(QtCore.Qt.UserRole, float(value))  # 存储实际数值
-                else:
-                    item = QtWidgets.QTableWidgetItem(str(value))
-                self.line_table.setItem(row_position, col_index, item)
+        self._populate_result_rows(self.line_table, shapes)
 
+
+    @stable_table_rows('rectangle_table')
     def populate_rectangle_table(self, shapes):
         if not shapes:
+            self._populate_result_rows(self.rectangle_table, [])
             return
 
         unit = shapes[0].unit if hasattr(shapes[0], 'unit') else 'pixel'
@@ -734,28 +859,13 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
         self.rectangle_table.setColumnCount(len(headers))
         self.rectangle_table.setHorizontalHeaderLabels(headers)
 
-        for shape in shapes:
-            row_position = self.rectangle_table.rowCount()
-            self.rectangle_table.insertRow(row_position)
-
-            results = shape.feature_results
-            if not isinstance(results, dict):
-                print(f"警告: feature_results 不是字典类型: {results}")
-                continue
-            for col_index, key in enumerate(results.keys()):
-                value = results.get(key, '')
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                if isinstance(value, (int, float)):
-                    item = NumericTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                    item.setData(QtCore.Qt.UserRole, float(value))  # 存储实际数值
-                else:
-                    item = QtWidgets.QTableWidgetItem(str(value))
-                self.rectangle_table.setItem(row_position, col_index, item)
+        self._populate_result_rows(self.rectangle_table, shapes)
 
 
+    @stable_table_rows('point_table')
     def populate_point_table(self, shapes):
         if not shapes:
+            self._populate_result_rows(self.point_table, [])
             return
 
 
@@ -768,25 +878,7 @@ class MeasuredResultsDock(QtWidgets.QDockWidget):
         self.point_table.setColumnCount(len(headers))
         self.point_table.setHorizontalHeaderLabels(headers)
 
-        for shape in shapes:
-            results = shape.feature_results
-            if not isinstance(results, dict):
-                print(f"警告: feature_results 不是字典类型: {results}")
-                continue
-            row_position = self.point_table.rowCount()
-            self.point_table.insertRow(row_position)
-            for col_index, key in enumerate(results.keys()):
-                value = results.get(key, '')
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                # item = QtWidgets.QTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                if isinstance(value, (int, float)):
-                    item = NumericTableWidgetItem(f"{value:.4f}" if isinstance(value, float) else str(value))
-                    item.setData(QtCore.Qt.UserRole, float(value))  # 存储实际数值
-                else:
-                    item = QtWidgets.QTableWidgetItem(str(value))
-                self.point_table.setItem(row_position, col_index, item)
-
-
+        self._populate_result_rows(self.point_table, shapes)
 
 
 class ImageResultsSummaryDock(QtWidgets.QDockWidget):
@@ -840,9 +932,13 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
         table.customContextMenuRequested.connect(lambda pos: self.create_context_menu(table, pos))
         # Add shortcut Ctrl+A
         select_all_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+A"), table)
-        select_all_shortcut.activated.connect(lambda: self.toggle_select_all(table))
+        select_all_shortcut.setContext(Qt.WidgetShortcut)
+        select_all_shortcut.activated.connect(table.selectAll)
         # Add copy action
         copy_action = QtWidgets.QAction("Copy", table)
+        copy_action.setShortcut(QtGui.QKeySequence.Copy)
+        copy_action.setShortcutContext(Qt.WidgetShortcut)
+        copy_action.setToolTip('Copy (Ctrl+C)')
         copy_action.triggered.connect(lambda: self.copy_selected_rows(table))
         table.addAction(copy_action)
         # 启用内置排序功能
@@ -890,50 +986,35 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
 #                 table.setItem(row_position, col, QtWidgets.QTableWidgetItem(data))
 
     def create_context_menu(self, table, position):
-        menu = QtWidgets.QMenu()
-        copy_action = menu.addAction("Copy")
-        delete_action = menu.addAction("Delete")
-        select_all_action = menu.addAction("Select All")
-        save_as_action = menu.addAction("Save As")
+        menu = QtWidgets.QMenu(self)
+        actions = {menu.addAction(name): callback for name, callback in (
+            ('Select All', table.selectAll),
+            ('Copy', lambda: self.copy_selected_rows(table)),
+            ('Export CSV', lambda: self.save_table_as(table)))}
         action = menu.exec_(table.viewport().mapToGlobal(position))
-        if action == copy_action:
-            self.copy_selected_rows(table)
-        elif action == delete_action:
-            self.delete_selected_rows(table)
-        elif action == select_all_action:
-            self.toggle_select_all(table)
-        elif action == save_as_action:
-            self.save_table_as(table)
+        if action in actions:
+            actions[action]()
 
     def copy_selected_rows(self, table):
-        if isinstance(table, QtWidgets.QTableWidget):
-            selected_rows = sorted(set(index.row() for index in table.selectedIndexes()))
-            if selected_rows:
-                data = []
-                headers = [table.horizontalHeaderItem(col).text() for col in range(table.columnCount())]
-                data.append('\t'.join(headers))  # 添加表头
-                for row in selected_rows:
-                    row_data = []
-                    for column in range(table.columnCount()):
-                        item = table.item(row, column)
-                        if item:
-                            row_data.append(item.text())
-                        else:
-                            row_data.append('')
-                    data.append('\t'.join(row_data))
-                clipboard = QtWidgets.QApplication.clipboard()
-                clipboard.setText('\n'.join(data))
-        else:
-            print("Selected widget is not a QTableWidget.--- by copy_selected_rows method")
-    
-   
+        from io import StringIO
+        rows = sorted({index.row() for index in table.selectedIndexes()})
+        if not rows:
+            return
+        stream = StringIO(newline='')
+        writer = csv.writer(stream, delimiter='\t', lineterminator='\r\n')
+        writer.writerow([table.horizontalHeaderItem(c).text() for c in range(table.columnCount())])
+        for row in rows:
+            values = []
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                raw = item.data(EXPORT_ROLE) if item else None
+                values.append(raw if raw is not None else item.text() if item else '')
+            writer.writerow(values)
+        QtWidgets.QApplication.clipboard().setText(stream.getvalue())
+
     def delete_selected_rows(self, table):
-        if isinstance(table, QtWidgets.QTableWidget):
-            selected_rows = sorted(set(index.row() for index in table.selectedIndexes()), reverse=True)
-            for row in selected_rows:
-                table.removeRow(row)
-        else:
-            print("Selected widget is not a QTableWidget.--- by delete_selected_rows method")
+        # Derived results cannot delete annotations or statistical rows.
+        return
 
     def toggle_select_all(self, table):
         if isinstance(table, QtWidgets.QTableWidget):
@@ -945,6 +1026,19 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             print("Selected widget is not a QTableWidget. --- by toggle_select_all method")
 
     def save_table_as(self, table):
+        parent = self.parent()
+        if hasattr(parent, 'measurements_ready_for_export'):
+            if not parent.measurements_ready_for_export():
+                return
+        elif hasattr(parent, 'refresh_measurements'):
+            parent.refresh_measurements(force=True)
+        controller = getattr(parent, 'measurement_controller', None)
+        if controller is not None:
+            canvas = controller.active()
+            if canvas is not None:
+                state = controller.state(canvas)
+                controller.summary_rows.write(state.summary, set(state.summary.bins),
+                                              set(state.summary.counts), canvas.image_size, state.scale)
         if isinstance(table, QtWidgets.QTableWidget):
             # 获取当前图片名称、QDockWidget名称和QtWidgets名称
             # # current_image_name = self.get_current_image_name()  # 需要实现此方法
@@ -960,19 +1054,10 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
                 "CSV Files (*.csv);;All Files (*)"
             )
             if path:
-                with open(path, 'w', encoding='utf-8') as file:
-                    # 写入表头
-                    headers = [table.horizontalHeaderItem(col).text() for col in range(table.columnCount())]
-                    file.write(','.join(headers) + '\n')
-                    for row in range(table.rowCount()):
-                        row_data = []
-                        for column in range(table.columnCount()):
-                            item = table.item(row, column)
-                            if item:
-                                row_data.append(item.text())
-                            else:
-                                row_data.append('')
-                        file.write(','.join(row_data) + '\n')
+                try:
+                    write_measurement_table(table, path, parent)
+                except (OSError, ValueError) as error:
+                    QtWidgets.QMessageBox.warning(parent, 'Save failed', str(error))
         else:
             print("Selected widget is not a QTableWidget.---by save_table_as method")
 
@@ -993,7 +1078,9 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             table.setColumnCount(7)
             table.setHorizontalHeaderLabels(headers)
 
-    def populate(self, shapes, image_width, image_height, scale_info=None):
+    def populate(self, shapes, image_width, image_height, scale_info=None, *, validated=False):
+        if not validated:
+            refresh_shapes(shapes, scale_info)
         # 使用形状数据填充表格
         
         self.populate_summary_table(shapes, image_width, image_height, scale_info)
@@ -1003,26 +1090,17 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
         else:
             self.populate_feature_tables([])
 
+    @stable_table_rows('summary_table')
     def populate_summary_table(self, shapes, image_width, image_height, scale_info=None):
         self.summary_table.setRowCount(0)  # 清空现有内容
 
 
-        # 计算图像面积
-        if scale_info:
-            # 假设 scale_info 中的 'scale_factor' 是 每单位长度的像素数
-            scale = scale_info.get('scale', 1.0)
-            width_in_units = image_width * scale
-            height_in_units = image_height * scale
-            image_area = width_in_units * height_in_units
-            area_unit = f"{scale_info.get('unit', 'pixel')}²"
-            density_unit = f"n/{area_unit}"
-        else:
-            # 使用像素
-            image_area = image_width * image_height
-            area_unit = 'pixels²'
-            density_unit = f"n/{area_unit}"
+        from measurements import summary_area
+        image_area, area_unit = summary_area(QtCore.QSize(image_width, image_height), scale_info)
+        density_unit = 'count/' + area_unit
+        self.summary_table.setProperty('density_unit', density_unit)
+        self.summary_table.setProperty('image_area_unit', area_unit)
 
-        # 收集每个 (label, shape_type) 的计数
         summary = {}
         for shape in shapes:
             key = (shape.label, shape.shape_type)
@@ -1056,6 +1134,8 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             # Image Area
             area_item = QtWidgets.QTableWidgetItem(f"{image_area:.4f} {area_unit}")
             self.summary_table.setItem(row_position, 4, area_item)
+            for column, value in enumerate([str(label), shape_type, num, density, image_area]):
+                self.summary_table.item(row_position, column).setData(EXPORT_ROLE, value)
 
     def populate_feature_tables(self, shapes):
         # 初始化每个形状类型的特征列表
@@ -1086,6 +1166,7 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             table = shape_type_tables[shape_type]
             self.populate_feature_table(table, features_list)
 
+    @stable_table_rows()
     def populate_feature_table(self, table, features_list):
         # 清空表格
         table.setRowCount(0)
@@ -1094,7 +1175,7 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             return
 
         # 获取特征名称列表
-        feature_names = list(features_list[0].keys())
+        feature_names = list(dict.fromkeys(key for features in features_list for key in features))
         # 移除非数值特征
         non_numeric_features = ['Label', 'Group ID', 'Center Point','Start Point','End Point']
         for name in non_numeric_features:
@@ -1107,8 +1188,8 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             values = []
             for features in features_list:
                 value = features.get(feature_name)
-                if isinstance(value, (int, float)):
-                    values.append(value)
+                if finite_numeric(value):
+                    values.append(float(value))
 
 
             num = len(values)
@@ -1150,3 +1231,5 @@ class ImageResultsSummaryDock(QtWidgets.QDockWidget):
             # Max
             max_item = QtWidgets.QTableWidgetItem(f"{max_value:.4f}")
             table.setItem(row_position, 6, max_item)
+            for column, value in enumerate([feature_name, num, average, std_dev, median, min_value, max_value]):
+                table.item(row_position, column).setData(EXPORT_ROLE, float(value) if finite_numeric(value) else value)
